@@ -1,7 +1,7 @@
-# flah-web — agent notes
+# flash — agent notes
 
-Next.js frontend. Backend API lives in sibling project `../flask-web-api`.
+Next.js frontend. Show sync server is in sibling project `../flask-web-api`.
 
-Run API first: `npm run dev:api` (port 3201), then `npm run dev` (port 3200). `/api/*` is proxied to the API.
+Run API first: `npm run dev:api` (show server on 3202), then `npm run dev` (port 3200). `/show-http/*` is proxied to the show server.
 
 Prefer reading existing patterns before changing code. Run `npm run lint` and `npm run build` before merging substantial changes.

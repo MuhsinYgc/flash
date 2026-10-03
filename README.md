@@ -1,10 +1,13 @@
 # flash
 
-Next.js frontend for a QR-synced phone light show. Operator plays a track; audience phones flash in time. Talks to the sibling API at `../flask-web-api`.
+Next.js frontend for a QR-synced phone light show. Operator plays a track; audience phones flash in time. Sync server lives in the sibling `../flask-web-api` project.
 
 ```bash
 npm run dev:api
 npm run dev
 ```
 
-Web UI: https://localhost:3200 (dev uses a local HTTPS cert). API is proxied at `/api/*`.
+- Operator: https://localhost:3200/operator
+- Audience join: https://localhost:3200/join
+
+Dev uses local HTTPS certs in `certificates/` (not committed).

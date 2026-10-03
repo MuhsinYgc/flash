@@ -20,7 +20,6 @@
   },
   "include": [
     "next-env.d.ts",
-    "proxy.ts",
     "app/**/*.ts",
     "app/**/*.tsx",
     "components/**/*.ts",

@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Flah",
-  description: "Base web app. Sign in and talk to the sibling API.",
+  title: "Flash",
+  description: "QR-synced phone light show. Operator controls playback; audience joins via QR.",
 };
 
 export default function RootLayout({

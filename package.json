@@ -1,0 +1,30 @@
+{
+  "name": "flah-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --experimental-https --experimental-https-key ./certificates/localhost-key.pem --experimental-https-cert ./certificates/localhost.pem --webpack -p 3200",
+    "dev:api": "npm run dev:all --prefix ../flask-web-api",
+    "dev:show": "npm run dev:show --prefix ../flask-web-api",
+    "build": "next build",
+    "start": "next start -p 3200",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "next": "16.2.6",
+    "qrcode": "^1.5.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.6",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

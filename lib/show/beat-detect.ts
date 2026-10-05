@@ -218,5 +218,5 @@ export function detectBeats(buffer: AudioBuffer): BeatMap {
 }
 
 export function beatsToCues(beatsMs: number[]): TimelineCue[] {
-  return beatsMs.map((atMs) => ({ atMs, onMs: 80 }));
+  return beatsMs.map((atMs) => ({ atMs, onMs: 120 }));
 }

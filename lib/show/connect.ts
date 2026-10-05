@@ -85,7 +85,10 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
 
   async function poll() {
     if (closed || wsUp) return;
-    const res = await fetchFirst(httpUrls("/snapshot", { room: roomId, clientId: httpId }));
+    const t0 = Date.now();
+    const res = await fetchFirst(
+      httpUrls("/snapshot", { room: roomId, clientId: httpId, t0: String(t0) }),
+    );
     if (!res) {
       httpUp = false;
       markConnected();
@@ -94,10 +97,15 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
     const data = (await res.json()) as {
       state: ShowState;
       audienceCount: number;
+      t1?: number;
+      t2?: number;
       flashes?: Extract<ServerMessage, { type: "flash" }>[];
     };
     httpUp = true;
     markConnected();
+    if (typeof data.t1 === "number") {
+      handleMessage({ type: "pong", t0, t1: data.t1, t2: data.t2 ?? data.t1 });
+    }
     handlers.onState(data.state, data.audienceCount);
     for (const flash of data.flashes ?? []) {
       handleMessage({ ...flash, type: "flash" });
@@ -119,8 +127,8 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
     return clock.offsetMs;
   }
 
+  const ready = calibrate();
   void poll();
-  void httpSync();
   pollTimer = window.setInterval(() => {
     void poll();
   }, 160);
@@ -144,6 +152,7 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
     clock,
     send,
     calibrate,
+    ready,
     close() {
       closed = true;
       window.clearInterval(pollTimer);

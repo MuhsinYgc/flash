@@ -37,6 +37,7 @@ export type ClientMessage =
       bpm?: number;
       cues?: TimelineCue[];
     }
+  | { type: "reanchor"; startedAtServerMs: number }
   | { type: "flash"; onMs?: number };
 
 export const PLAY_LEAD_MS = 420;

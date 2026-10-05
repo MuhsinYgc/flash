@@ -6,13 +6,14 @@ async function proxy(request: Request, path: string[]) {
   const incoming = new URL(request.url);
   const target = `${showOrigin}/${path.join("/")}${incoming.search}`;
   try {
+    const hasBody = request.method !== "GET" && request.method !== "HEAD";
     const upstream = await fetch(target, {
       method: request.method,
       headers: { "content-type": request.headers.get("content-type") ?? "application/json" },
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.text(),
+      body: hasBody ? await request.arrayBuffer() : undefined,
       cache: "no-store",
     });
-    const body = await upstream.text();
+    const body = await upstream.arrayBuffer();
     return new Response(body, {
       status: upstream.status,
       headers: {

@@ -2,63 +2,86 @@
 
 import { beatsToCues, detectBeats } from "@/lib/show/beat-detect";
 import { connectShow } from "@/lib/show/connect";
+import { getShowHttpUrl, sanitizeRoomId, type ClientMessage } from "@/lib/show/protocol";
 import {
-  PLAY_LEAD_MS,
-  SHOW_COLORS,
-  defaultShowState,
-  sanitizeRoomId,
-  type ClientMessage,
-  type ShowPattern,
-  type ShowState,
-  type TimelineCue,
-} from "@/lib/show/protocol";
-import { showTimeMs } from "@/lib/show/timeline-player";
-import { createTrackPlayer } from "@/lib/show/track-player";
+  commitPlaylist,
+  getPlaylistSnapshot,
+  getPlaylistServerSnapshot,
+  parseYouTubeVideoId,
+  subscribePlaylist,
+  type PlaylistRow,
+} from "@/lib/show/youtube";
+import {
+  mountYouTubePlayer,
+  YT_ENDED,
+  YT_PLAYING,
+  type BoothPlayer,
+} from "@/lib/show/youtube-player";
 import QRCode from "qrcode";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
-type LoadedTrack = {
-  name: string;
-  durationMs: number;
-  bpm: number;
-  cues: TimelineCue[];
-  buffer: AudioBuffer;
-};
+type Phase = "idle" | "gap" | "playing";
+type Row = PlaylistRow;
 
 const DEFAULT_PUBLIC_ORIGIN = "https://192.168.1.70:3200";
-
-const PATTERNS: { id: ShowPattern; label: string; hint: string }[] = [
-  { id: "beat", label: "Beat", hint: "Flash on each beat" },
-  { id: "pulse", label: "Pulse", hint: "Steady 2.5 Hz pulse" },
-  { id: "hold", label: "Hold", hint: "Solid light while playing" },
-  { id: "timeline", label: "Demo", hint: "16 beats, then hits" },
-];
+const FLASH_LEAD_MS = 170;
+const SEEK_MS = 400;
+const LOOP_MS = 500;
+const CUE_ON_MS = 120;
 
 export function OperatorClient({ roomId }: { roomId: string }) {
   const [room, setRoom] = useState(roomId);
   const [publicOrigin, setPublicOrigin] = useState(DEFAULT_PUBLIC_ORIGIN);
   const [qr, setQr] = useState("");
   const [connected, setConnected] = useState(false);
-  const [synced, setSynced] = useState(false);
   const [audienceCount, setAudienceCount] = useState(0);
-  const [state, setState] = useState<ShowState>(defaultShowState);
-  const [clockMs, setClockMs] = useState(0);
+  const playlist = useSyncExternalStore(
+    subscribePlaylist,
+    getPlaylistSnapshot,
+    getPlaylistServerSnapshot,
+  );
+  const [selectedId, setSelectedId] = useState("");
+  const [currentId, setCurrentId] = useState("");
+  const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
-  const [track, setTrack] = useState<LoadedTrack | null>(null);
-  const [analyzing, setAnalyzing] = useState(false);
+  const [playerReady, setPlayerReady] = useState(false);
+  const [wantPlay, setWantPlay] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
   const [positionMs, setPositionMs] = useState(0);
+
   const sendRef = useRef<(msg: ClientMessage) => void | Promise<void>>(() => undefined);
   const sessionRef = useRef<ReturnType<typeof connectShow> | null>(null);
-  const playerRef = useRef<ReturnType<typeof createTrackPlayer> | null>(null);
-  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const trackRef = useRef<LoadedTrack | null>(null);
-  const seekingRef = useRef(false);
+  const playerRef = useRef<BoothPlayer | null>(null);
+  const currentIdRef = useRef("");
+  const wantPlayRef = useRef(false);
+  const anchoredRef = useRef(false);
+  const anchorAtRef = useRef<number | null>(null);
+  const flashedStopRef = useRef(false);
+  const lastTimeRef = useRef(0);
+  const stallRef = useRef(0);
+  const endedForRef = useRef("");
+  const onEndedRef = useRef(() => undefined);
+  const clockReadyRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const origin = normalizeJoinOrigin(publicOrigin) || DEFAULT_PUBLIC_ORIGIN;
-  const joinUrl = useMemo(() => {
-    return `${origin}/join?room=${encodeURIComponent(room)}`;
-  }, [origin, room]);
+  const joinUrl = useMemo(
+    () => `${origin}/join?room=${encodeURIComponent(room)}`,
+    [origin, room],
+  );
   const wrongPort = /:32000\b/.test(publicOrigin);
+  const localhost = origin.includes("localhost") || origin.includes("127.0.0.1");
+  const selected = playlist.find((track) => track.videoId === selectedId) ?? null;
+  const current = playlist.find((track) => track.videoId === currentId) ?? null;
+  const readyTracks = playlist.filter((track) => track.status === "ready");
+  const orderId = currentId || selectedId;
+  const orderIndex = readyTracks.findIndex((track) => track.videoId === orderId);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,44 +102,25 @@ export function OperatorClient({ roomId }: { roomId: string }) {
   }, [joinUrl]);
 
   useEffect(() => {
-    let latest = defaultShowState();
+    let cancelled = false;
+    anchoredRef.current = false;
+    anchorAtRef.current = null;
+    flashedStopRef.current = false;
+    clockReadyRef.current = false;
     const session = connectShow("operator", room, {
-      onConnected: (ok) => {
-        setConnected(ok);
-        setSynced(ok);
-        if (ok) setError("");
-      },
-      onState: (next, count) => {
-        const loaded = trackRef.current;
-        latest = loaded
-          ? {
-              ...next,
-              pattern: "timeline",
-              timeline: loaded.cues,
-              bpm: loaded.bpm,
-            }
-          : next;
-        setState(latest);
-        setAudienceCount(count);
-      },
+      onConnected: (ok) => setConnected(ok),
+      onState: (_next, count) => setAudienceCount(count),
       onFlash: () => undefined,
       onError: (message) => setError(message),
     });
     sendRef.current = session.send;
     sessionRef.current = session;
-
-    const timer = window.setInterval(() => {
-      const showMs = showTimeMs(latest, session.clock.serverNow());
-      const loaded = trackRef.current;
-      const nextPos = Math.max(0, Math.min(loaded?.durationMs ?? Infinity, showMs ?? 0));
-      setClockMs(nextPos);
-      if (loaded && latest.playing && !seekingRef.current) {
-        setPositionMs(nextPos);
-      }
-    }, 80);
-
+    void session.ready.then(() => {
+      if (!cancelled) clockReadyRef.current = true;
+    });
     return () => {
-      window.clearInterval(timer);
+      cancelled = true;
+      clockReadyRef.current = false;
       sendRef.current = () => undefined;
       sessionRef.current = null;
       session.close();
@@ -124,161 +128,293 @@ export function OperatorClient({ roomId }: { roomId: string }) {
   }, [room]);
 
   useEffect(() => {
-    playerRef.current = createTrackPlayer();
+    mountedRef.current = true;
+    let cancelled = false;
+    let player: BoothPlayer | null = null;
+    void mountYouTubePlayer("booth-player", (state) => {
+      if (state === YT_ENDED) onEndedRef.current();
+    }).then((handle) => {
+      if (cancelled) {
+        handle.destroy();
+        return;
+      }
+      player = handle;
+      playerRef.current = handle;
+      setPlayerReady(true);
+    });
     return () => {
-      playerRef.current?.close();
-      playerRef.current = null;
+      cancelled = true;
+      mountedRef.current = false;
+      player?.destroy();
+      if (playerRef.current === player) playerRef.current = null;
     };
   }, []);
 
-  function send(msg: ClientMessage) {
-    if (msg.type === "setBpm") {
-      setState((current) => ({ ...current, bpm: msg.bpm }));
-    }
-    if (msg.type === "setPattern") {
-      setState((current) => ({ ...current, pattern: msg.pattern }));
-    }
-    if (msg.type === "setColor") {
-      setState((current) => ({ ...current, color: msg.color }));
-    }
-    void sendRef.current(msg);
+  useEffect(() => {
+    onEndedRef.current = () => {
+      if (!mountedRef.current) return;
+      const active = playerRef.current;
+      const id = active?.videoId() ?? "";
+      if (!id || endedForRef.current === id || id !== currentIdRef.current) return;
+      endedForRef.current = id;
+      if (!wantPlayRef.current) return;
+      const list = getPlaylistSnapshot().filter((track) => track.status === "ready");
+      const index = list.findIndex((track) => track.videoId === id);
+      const next = list[index + 1];
+      if (!next) {
+        setTransport(false);
+        halt();
+        setPhase("idle");
+        return;
+      }
+      begin(next, true);
+    };
+  });
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const player = playerRef.current;
+      const session = sessionRef.current;
+      if (!player || !session || !wantPlayRef.current) return;
+      const track = getPlaylistSnapshot().find(
+        (item) => item.videoId === currentIdRef.current && item.status === "ready",
+      );
+      if (!track) return;
+
+      const state = player.state();
+      const timeMs = player.currentTimeMs();
+      setPositionMs(timeMs);
+
+      if (state !== YT_PLAYING) {
+        stallRef.current = 0;
+        lastTimeRef.current = timeMs;
+        if (anchoredRef.current) {
+          halt();
+          setPhase((currentPhase) => (currentPhase === "gap" ? currentPhase : "gap"));
+        }
+        return;
+      }
+
+      const advanced = timeMs > lastTimeRef.current + 15;
+      lastTimeRef.current = timeMs;
+      if (!advanced) {
+        stallRef.current += 1;
+        if (anchoredRef.current && stallRef.current >= 2) {
+          halt();
+          setPhase("gap");
+        }
+        return;
+      }
+      stallRef.current = 0;
+
+      const serverNow = session.clock.serverNow();
+      if (!anchoredRef.current || anchorAtRef.current == null) {
+        if (!clockReadyRef.current) return;
+        const startedAtServerMs = Math.round(serverNow - timeMs - FLASH_LEAD_MS);
+        anchorAtRef.current = startedAtServerMs;
+        anchoredRef.current = true;
+        flashedStopRef.current = false;
+        setPhase("playing");
+        void sendRef.current({
+          type: "playTrack",
+          startedAtServerMs,
+          bpm: track.bpm,
+          cues: track.cues.map((cue) => ({ atMs: cue.atMs, onMs: Math.max(CUE_ON_MS, cue.onMs) })),
+        });
+        return;
+      }
+
+      const errorMs = timeMs - (serverNow - anchorAtRef.current - FLASH_LEAD_MS);
+      if (Math.abs(errorMs) > SEEK_MS) {
+        halt();
+        setPhase("gap");
+        return;
+      }
+      setPhase((currentPhase) => (currentPhase === "playing" ? currentPhase : "playing"));
+    }, LOOP_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  function halt() {
+    anchoredRef.current = false;
+    anchorAtRef.current = null;
+    if (flashedStopRef.current) return;
+    flashedStopRef.current = true;
+    void sendRef.current({ type: "stop" });
   }
 
-  async function onPickTrack(file: File | undefined) {
-    if (!file) return;
-    if (file.size > 40 * 1024 * 1024) {
-      setError("Dosya 40 MB’dan küçük olmalı.");
+  function setTransport(next: boolean) {
+    wantPlayRef.current = next;
+    setWantPlay(next);
+  }
+
+  function begin(track: Row, autoplay: boolean) {
+    endedForRef.current = "";
+    stallRef.current = 0;
+    lastTimeRef.current = 0;
+    anchoredRef.current = false;
+    anchorAtRef.current = null;
+    currentIdRef.current = track.videoId;
+    setCurrentId(track.videoId);
+    setSelectedId(track.videoId);
+    setTransport(autoplay);
+    setPhase(autoplay ? "gap" : "idle");
+    setPositionMs(0);
+    flashedStopRef.current = false;
+    void sendRef.current({ type: "stop" });
+    flashedStopRef.current = true;
+    const player = playerRef.current;
+    if (!player) return;
+    if (autoplay) player.load(track.videoId);
+    else player.cue(track.videoId);
+  }
+
+  async function addLink(raw: string) {
+    const videoId = parseYouTubeVideoId(raw);
+    if (!videoId) {
+      setError("YouTube linki değil.");
+      return;
+    }
+    if (getPlaylistSnapshot().some((track) => track.videoId === videoId)) {
+      setError("Bu parça zaten listede.");
       return;
     }
     setError("");
-    setAnalyzing(true);
-    stopAudio();
+    setDraft("");
+    const placeholder: Row = {
+      videoId,
+      title: "Ritim hazırlanıyor…",
+      bpm: 0,
+      durationMs: 0,
+      cues: [],
+      status: "analyzing",
+    };
+    commitPlaylist((list) =>
+      list.some((track) => track.videoId === videoId) ? list : [...list, placeholder],
+    );
+    if (!selectedId) setSelectedId(videoId);
     try {
-      const player = playerRef.current ?? createTrackPlayer();
-      playerRef.current = player;
-      const buffer = await player.decode(file);
-      await new Promise((resolve) => window.setTimeout(resolve, 40));
+      const infoRes = await fetch(getShowHttpUrl("/youtube/info", { videoId }));
+      const info = (await infoRes.json()) as { title?: string; error?: string };
+      if (!infoRes.ok) throw new Error(info.error || "Video bulunamadı.");
+      if (mountedRef.current) {
+        commitPlaylist((list) =>
+          list.map((track) =>
+            track.videoId === videoId ? { ...track, title: info.title || videoId } : track,
+          ),
+        );
+      }
+      const audioRes = await fetch(getShowHttpUrl("/youtube/audio", { videoId }));
+      if (!audioRes.ok) {
+        const data = (await audioRes.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error || "Ses indirilemedi.");
+      }
+      const contentType = audioRes.headers.get("content-type") ?? "";
+      if (!contentType.startsWith("audio/")) throw new Error("Ses indirilemedi.");
+      const buffer = await decodeAudio(await audioRes.arrayBuffer());
       const map = detectBeats(buffer);
       const cues = beatsToCues(map.beatsMs);
-      if (cues.length < 8) {
-        throw new Error("Bu kayıtta yeterli beat bulunamadı. Daha net bir parça dene.");
-      }
-      const loaded = {
-        name: file.name,
-        durationMs: map.durationMs,
-        bpm: Math.round(map.bpm),
-        cues,
-        buffer,
-      };
-      trackRef.current = loaded;
-      setTrack(loaded);
-      setPositionMs(0);
-      setState((current) => ({
-        ...current,
-        playing: false,
-        startedAtServerMs: null,
-        bpm: loaded.bpm,
-        pattern: "timeline",
-        timeline: cues,
-      }));
-      await sendRef.current({ type: "stop" });
-      await sendRef.current({ type: "setBpm", bpm: loaded.bpm });
-      await sendRef.current({ type: "setTimeline", cues });
+      if (cues.length < 8) throw new Error("Bu kayıtta yeterli beat bulunamadı.");
+      if (!mountedRef.current) return;
+      commitPlaylist((list) =>
+        list.map((track) =>
+          track.videoId === videoId
+            ? {
+                ...track,
+                title: info.title || track.title,
+                bpm: Math.round(map.bpm),
+                durationMs: Math.round(map.durationMs),
+                cues,
+                status: "ready",
+                error: undefined,
+              }
+            : track,
+        ),
+      );
     } catch (err) {
-      trackRef.current = null;
-      setTrack(null);
-      setError(err instanceof Error ? err.message : "Şarkı analiz edilemedi.");
-    } finally {
-      setAnalyzing(false);
+      const message = err instanceof Error ? err.message : "Şarkı hazırlanamadı.";
+      if (!mountedRef.current) return;
+      commitPlaylist((list) =>
+        list.map((track) =>
+          track.videoId === videoId ? { ...track, status: "error", error: message } : track,
+        ),
+      );
+      setError(message);
     }
   }
 
-  function stopAudio() {
-    sourceRef.current = null;
-    playerRef.current?.stop();
-  }
-
-  async function playFrom(offsetMs: number) {
-    const loaded = trackRef.current;
-    if (!loaded) {
-      setError("Önce bir şarkı yükle.");
+  function play() {
+    const track =
+      (selected?.status === "ready" ? selected : null) ?? (!selectedId ? readyTracks[0] : null);
+    if (!track) {
+      setError("Önce ritmi hazır bir parça seç.");
       return;
     }
-    if (!playerRef.current || !sessionRef.current) {
-      setError("Show sunucusuna bağlı değil. Sayfayı yenile.");
+    if (!playerRef.current || !playerReady) {
+      setError("YouTube oynatıcı hazır değil.");
       return;
     }
-    const duration = loaded.durationMs;
-    const offset = Math.max(0, Math.min(duration - 50, offsetMs));
     setError("");
-    const player = playerRef.current;
-    await player.resume();
-    await sessionRef.current.calibrate();
-    const startCtx = player.now() + PLAY_LEAD_MS / 1000;
-    const startedAtServerMs = Math.round(
-      sessionRef.current.clock.serverNow() + PLAY_LEAD_MS - offset,
-    );
-    const source = await player.playAt(loaded.buffer, startCtx, offset / 1000);
-    sourceRef.current = source;
-    void sendRef.current({
-      type: "playTrack",
-      startedAtServerMs,
-      bpm: loaded.bpm,
-      cues: loaded.cues,
-    });
-    source.onended = () => {
-      if (sourceRef.current === source) {
-        sourceRef.current = null;
-        setPositionMs(loaded.durationMs);
-        send({ type: "stop" });
-        setState((current) => ({ ...current, playing: false }));
-      }
-    };
-    setPositionMs(offset);
-    setState((current) => ({
-      ...current,
-      playing: true,
-      startedAtServerMs,
-      pattern: "timeline",
-      bpm: loaded.bpm,
-      timeline: loaded.cues,
-    }));
+    const same = playerRef.current.videoId() === track.videoId;
+    if (!same) {
+      begin(track, true);
+      return;
+    }
+    endedForRef.current = "";
+    stallRef.current = 0;
+    currentIdRef.current = track.videoId;
+    setCurrentId(track.videoId);
+    setTransport(true);
+    setPhase("gap");
+    playerRef.current.play();
   }
 
-  function handlePause() {
-    const loaded = trackRef.current;
-    const live =
-      loaded && sessionRef.current
-        ? showTimeMs(state, sessionRef.current.clock.serverNow())
-        : positionMs;
-    const current = loaded
-      ? Math.max(0, Math.min(loaded.durationMs, live ?? positionMs))
-      : positionMs;
-    stopAudio();
-    setPositionMs(current);
-    send({ type: "stop" });
-    setState((prev) => ({ ...prev, playing: false }));
+  function pause() {
+    playerRef.current?.pause();
+    setTransport(false);
+    halt();
+    setPhase("idle");
   }
 
-  function handleStop() {
-    stopAudio();
-    setPositionMs(0);
-    send({ type: "stop" });
-    setState((current) => ({ ...current, playing: false, startedAtServerMs: null }));
-  }
-
-  async function seekTo(nextMs: number) {
-    const loaded = trackRef.current;
-    if (!loaded) return;
-    const offset = Math.max(0, Math.min(loaded.durationMs, nextMs));
-    setPositionMs(offset);
-    if (state.playing) {
-      await playFrom(offset);
+  function step(direction: -1 | 1) {
+    const list = getPlaylistSnapshot().filter((track) => track.status === "ready");
+    if (list.length === 0) return;
+    const index = list.findIndex((track) => track.videoId === (currentIdRef.current || selectedId));
+    const next = list[index < 0 ? 0 : index + direction];
+    if (!next) return;
+    if (wantPlayRef.current) begin(next, true);
+    else {
+      setSelectedId(next.videoId);
+      begin(next, false);
     }
   }
 
-  const localhost =
-    origin.includes("localhost") || origin.includes("127.0.0.1");
+  function removeTrack(videoId: string) {
+    commitPlaylist((list) => list.filter((track) => track.videoId !== videoId));
+    if (selectedId === videoId) setSelectedId("");
+    if (currentIdRef.current !== videoId) return;
+    playerRef.current?.pause();
+    setTransport(false);
+    halt();
+    setPhase("idle");
+    currentIdRef.current = "";
+    setCurrentId("");
+  }
+
+  function moveTrack(videoId: string, direction: -1 | 1) {
+    commitPlaylist((list) => {
+      const index = list.findIndex((track) => track.videoId === videoId);
+      const next = index + direction;
+      if (index < 0 || next < 0 || next >= list.length) return list;
+      const copy = list.slice();
+      const [item] = copy.splice(index, 1);
+      if (!item) return list;
+      copy.splice(next, 0, item);
+      return copy;
+    });
+  }
+
+  const screenUrl = `/screen?room=${encodeURIComponent(room)}&origin=${encodeURIComponent(origin)}`;
 
   return (
     <main className="mx-auto flex min-h-full w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-8">
@@ -287,20 +423,17 @@ export function OperatorClient({ roomId }: { roomId: string }) {
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-foreground/50">
             Operator
           </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Light show</h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Flaş</h1>
         </div>
         <div className="flex flex-wrap gap-2 text-xs font-medium">
           <Pill ok={connected} label={connected ? "Console live" : "Offline"} />
-          <Pill ok={synced} label={synced ? "Clock synced" : "Syncing"} />
           <Pill ok={audienceCount > 0} label={`${audienceCount} phones`} />
           <Pill
-            ok={state.playing}
+            ok={phase === "playing"}
             label={
-              track
-                ? `${formatClock(positionMs)} / ${formatClock(track.durationMs)}`
-                : state.playing
-                  ? formatClock(clockMs)
-                  : "Stopped"
+              current?.status === "ready"
+                ? `${formatClock(positionMs)} / ${formatClock(current.durationMs)}`
+                : "Durdu"
             }
           />
         </div>
@@ -310,7 +443,7 @@ export function OperatorClient({ roomId }: { roomId: string }) {
         <article className="rounded-2xl border border-border bg-surface p-5">
           <h2 className="text-sm font-semibold">Audience QR</h2>
           <p className="mt-1 text-sm text-foreground/70">
-            Phones scan this, accept the warning, and stay on the page.
+            QR şarkı değişince değişmez. Dev ekranda açık kalsın.
           </p>
           <label className="mt-4 block text-xs font-medium text-foreground/60">
             Public site URL
@@ -335,8 +468,7 @@ export function OperatorClient({ roomId }: { roomId: string }) {
           ) : null}
           {localhost ? (
             <p className="mt-3 text-xs leading-5 text-foreground/60">
-              Telefona localhost yazma. Kutuyu http://192.168.1.70:3200
-              olarak bırak, sonra QR’ı oku.
+              Telefona localhost yazma. Kutuyu http://192.168.1.70:3200 olarak bırak, sonra QR’ı oku.
             </p>
           ) : null}
           <div className="mt-4 flex justify-center rounded-xl bg-white p-3">
@@ -350,158 +482,160 @@ export function OperatorClient({ roomId }: { roomId: string }) {
             )}
           </div>
           <p className="mt-3 break-all text-xs text-foreground/60">{joinUrl}</p>
+          <a
+            href={screenUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-4 flex min-h-11 items-center justify-center rounded-xl bg-accent px-3 py-2 text-sm font-semibold text-white"
+          >
+            Dev ekranda aç
+          </a>
         </article>
 
         <article className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="text-sm font-semibold">Show control</h2>
+          <h2 className="text-sm font-semibold">Playlist</h2>
           <p className="mt-1 text-sm text-foreground/70">
-            Şarkı yüklüyken flaş o parçanın vuruşlarına kilitlenir.
-            Demo / Beat kullanılmaz. Duraklatınca kaldığın yerden devam eder.
+            Link ekle, ritim hazır olunca başlat. Flaş, ses gerçekten çalınca başlar.
           </p>
+          <p className="mt-2 text-sm font-medium">{statusLabel(phase, wantPlay, playerReady)}</p>
 
-          <label className="mt-5 block rounded-xl border border-dashed border-border bg-background px-4 py-4 text-sm">
-            <span className="font-medium">Şarkı yükle</span>
+          <form
+            className="mt-4 flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void addLink(draft);
+            }}
+          >
             <input
-              type="file"
-              accept="audio/*"
-              className="mt-2 block w-full text-xs"
-              disabled={analyzing}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = "";
-                void onPickTrack(file);
-              }}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              placeholder="YouTube linki"
+              className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
             />
-            <p className="mt-2 text-xs text-foreground/60">
-              {analyzing
-                ? "Beat analizi yapılıyor…"
-                : track
-                  ? `${track.name} · ${formatClock(track.durationMs)} · ${track.bpm} BPM · ${track.cues.length} flaş`
-                  : "MP3, WAV veya M4A. En fazla 40 MB."}
-            </p>
-          </label>
+            <button
+              type="submit"
+              className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white"
+            >
+              Ekle
+            </button>
+          </form>
 
-          {track ? (
-            <div className="mt-5 rounded-xl border border-border bg-background p-4">
-              <div className="flex items-center justify-between text-xs text-foreground/60">
-                <span>{formatClock(positionMs)}</span>
-                <span className="font-medium text-foreground">
-                  Şarkı ritmi · {track.bpm} BPM · {track.cues.length} vuruş
-                </span>
-                <span>{formatClock(track.durationMs)}</span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={track.durationMs}
-                step={100}
-                value={Math.min(positionMs, track.durationMs)}
-                className="mt-3 w-full"
-                onPointerDown={() => {
-                  seekingRef.current = true;
-                }}
-                onChange={(event) => setPositionMs(Number(event.target.value))}
-                onPointerUp={(event) => {
-                  const next = Number((event.target as HTMLInputElement).value);
-                  seekingRef.current = false;
-                  void seekTo(next);
-                }}
-              />
-            </div>
-          ) : null}
+          {playlist.length === 0 ? (
+            <p className="mt-4 text-sm text-foreground/60">Liste boş.</p>
+          ) : (
+            <ul className="mt-4 flex flex-col gap-2">
+              {playlist.map((track, index) => (
+                <li
+                  key={track.videoId}
+                  className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${
+                    track.videoId === selectedId ? "border-accent bg-accent/10" : "border-border"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(track.videoId)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <span className="block truncate text-sm font-semibold">{track.title}</span>
+                    <span className="block text-xs text-foreground/60">
+                      {track.status === "analyzing"
+                        ? "Ritim hazırlanıyor…"
+                        : track.status === "error"
+                          ? track.error
+                          : `${formatClock(track.durationMs)}${
+                              track.videoId === currentId && wantPlay ? " · çalıyor" : ""
+                            }`}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveTrack(track.videoId, -1)}
+                    disabled={index === 0}
+                    className="rounded-lg border border-border px-2 py-1 text-xs disabled:opacity-40"
+                  >
+                    Yukarı
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveTrack(track.videoId, 1)}
+                    disabled={index === playlist.length - 1}
+                    className="rounded-lg border border-border px-2 py-1 text-xs disabled:opacity-40"
+                  >
+                    Aşağı
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeTrack(track.videoId)}
+                    className="rounded-lg border border-border px-2 py-1 text-xs"
+                  >
+                    Sil
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
 
           <div className="mt-5 flex flex-wrap gap-2">
             <button
               type="button"
+              onClick={() => step(-1)}
+              disabled={orderIndex <= 0}
+              className="rounded-xl border border-border px-3 py-2.5 text-sm font-semibold disabled:opacity-40"
+            >
+              Önceki
+            </button>
+            <button
+              type="button"
               onClick={() => {
-                if (state.playing) handlePause();
-                else void playFrom(positionMs);
+                if (wantPlay) pause();
+                else play();
               }}
-              disabled={analyzing || !track}
+              disabled={!playerReady || readyTracks.length === 0}
               className="rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
             >
-              {state.playing ? "Pause" : "Play"}
+              {wantPlay ? "Duraklat" : "Çal"}
             </button>
             <button
               type="button"
-              onClick={handleStop}
-              className="rounded-xl border border-border px-3 py-2.5 text-sm font-semibold"
+              onClick={() => step(1)}
+              disabled={orderIndex < 0 || orderIndex >= readyTracks.length - 1}
+              className="rounded-xl border border-border px-3 py-2.5 text-sm font-semibold disabled:opacity-40"
             >
-              Başa sar
-            </button>
-            <button
-              type="button"
-              onClick={() => send({ type: "flash", onMs: 100 })}
-              className="rounded-xl border border-border px-4 py-2.5 text-sm font-semibold"
-            >
-              Flash now
+              Sonraki
             </button>
           </div>
 
-          {!track ? (
-          <div className="mt-6">
-            <p className="text-xs font-medium text-foreground/60">Pattern</p>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {PATTERNS.map((pattern) => (
-                <button
-                  key={pattern.id}
-                  type="button"
-                  onClick={() => send({ type: "setPattern", pattern: pattern.id })}
-                  className={`rounded-xl border px-3 py-2 text-left ${
-                    state.pattern === pattern.id
-                      ? "border-accent bg-accent/10"
-                      : "border-border"
-                  }`}
-                >
-                  <span className="block text-sm font-semibold">{pattern.label}</span>
-                  <span className="block text-xs text-foreground/60">{pattern.hint}</span>
-                </button>
-              ))}
-            </div>
+          <div className="mt-5 min-h-[180px] overflow-hidden rounded-xl bg-black">
+            <div id="booth-player" />
           </div>
+          <p className="mt-2 text-xs text-foreground/60">Kabin sesi bu oynatıcıdan çıkar.</p>
+          {selected?.status === "analyzing" ? (
+            <p className="mt-3 text-sm text-foreground/70">Ritim hazırlanıyor…</p>
           ) : null}
-
-          {!track ? (
-          <label className="mt-6 block text-xs font-medium text-foreground/60">
-            BPM {state.bpm}
-            <input
-              type="range"
-              min={60}
-              max={170}
-              value={state.bpm}
-              onChange={(event) => send({ type: "setBpm", bpm: Number(event.target.value) })}
-              className="mt-2 w-full"
-            />
-          </label>
-          ) : null}
-
-          <div className="mt-5">
-            <p className="text-xs font-medium text-foreground/60">Color</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {SHOW_COLORS.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => send({ type: "setColor", color: item.value })}
-                  className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm ${
-                    state.color === item.value ? "border-accent" : "border-border"
-                  }`}
-                >
-                  <span
-                    className="h-3.5 w-3.5 rounded-full border border-black/10"
-                    style={{ backgroundColor: item.value }}
-                  />
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
           {error ? <p className="mt-4 text-sm text-red-700">{error}</p> : null}
         </article>
       </section>
     </main>
   );
+}
+
+function statusLabel(phase: Phase, wantPlay: boolean, playerReady: boolean) {
+  if (!playerReady) return "Oynatıcı hazırlanıyor";
+  if (phase === "playing") return "Çalıyor";
+  if (wantPlay) return "Ara — ses başlayınca flaş başlar";
+  return "Durdu";
+}
+
+async function decodeAudio(bytes: ArrayBuffer) {
+  const ctx = new AudioContext();
+  try {
+    await ctx.resume();
+    return await ctx.decodeAudioData(bytes.slice(0));
+  } catch {
+    throw new Error("Bu parçanın sesi okunamadı.");
+  } finally {
+    await ctx.close();
+  }
 }
 
 function Pill({ ok, label }: { ok: boolean; label: string }) {

@@ -15,22 +15,38 @@ type Handlers = {
   onError?: (message: string) => void;
 };
 
+type ConnectOptions = {
+  token?: string;
+};
+
 function newHttpId() {
   return `h${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) {
+export function connectShow(
+  role: ShowRole,
+  roomId: string,
+  handlers: Handlers,
+  options: ConnectOptions = {},
+) {
   const clock = createClockSync();
   const httpId = newHttpId();
-  const seenFlashes = new Set<string>();
+  const seenFlashes = new Map<string, number>();
   let closed = false;
   let wsUp = false;
   let httpUp = false;
   let pollTimer = 0;
   let syncTimer = 0;
+  const securePage = window.location.protocol === "https:";
 
   function markConnected() {
     handlers.onConnected(wsUp || httpUp);
+  }
+
+  function pruneSeen(now = Date.now()) {
+    for (const [key, at] of seenFlashes) {
+      if (now - at > 5000) seenFlashes.delete(key);
+    }
   }
 
   function handleMessage(msg: ServerMessage) {
@@ -40,28 +56,34 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
     if (msg.type === "flash") {
       const key = `${msg.atServerMs}:${msg.onMs}:${msg.color}`;
       if (seenFlashes.has(key)) return;
-      seenFlashes.add(key);
+      seenFlashes.set(key, Date.now());
+      pruneSeen();
       handlers.onFlash(msg);
     }
     if (msg.type === "pong") clock.handlePong(msg);
     if (msg.type === "error") handlers.onError?.(msg.message);
   }
 
-  const securePage = window.location.protocol === "https:";
-  const socket = securePage
-    ? null
-    : connectShowSocket(role, roomId, {
-        onOpen: () => {
-          wsUp = true;
-          markConnected();
-          void clock.calibrate((t0) => socket?.send({ type: "sync", t0 }));
-        },
-        onClose: () => {
-          wsUp = false;
-          markConnected();
-        },
-        onMessage: handleMessage,
-      });
+  const socket = connectShowSocket(
+    role,
+    roomId,
+    {
+      onOpen: () => {
+        wsUp = true;
+        markConnected();
+        void clock.calibrate((t0) => socket.send({ type: "sync", t0 }));
+      },
+      onClose: () => {
+        wsUp = false;
+        markConnected();
+      },
+      onMessage: handleMessage,
+    },
+    {
+      token: options.token,
+      maxRetries: securePage ? 2 : 8,
+    },
+  );
 
   function httpUrls(path: string, params: Record<string, string>) {
     const sameOrigin = getShowHttpUrl(path, params);
@@ -86,9 +108,13 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
   async function poll() {
     if (closed || wsUp) return;
     const t0 = Date.now();
-    const res = await fetchFirst(
-      httpUrls("/snapshot", { room: roomId, clientId: httpId, t0: String(t0) }),
-    );
+    const params: Record<string, string> = {
+      room: roomId,
+      clientId: httpId,
+      t0: String(t0),
+    };
+    if (role === "operator") params.role = "operator";
+    const res = await fetchFirst(httpUrls("/snapshot", params));
     if (!res) {
       httpUp = false;
       markConnected();
@@ -137,14 +163,17 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
   }, 4000);
 
   async function send(msg: ClientMessage) {
-    if (socket) {
-      socket.send(msg);
+    const payload =
+      options.token && msg.type !== "sync" ? { ...msg, token: options.token } : msg;
+    if (wsUp) {
+      socket.send(payload);
       return;
     }
+    if (msg.type === "hello" || msg.type === "sync") return;
     await fetch(getShowHttpUrl("/command"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...msg, roomId }),
+      body: JSON.stringify({ ...payload, roomId }),
     }).catch(() => undefined);
   }
 
@@ -157,7 +186,7 @@ export function connectShow(role: ShowRole, roomId: string, handlers: Handlers) 
       closed = true;
       window.clearInterval(pollTimer);
       window.clearInterval(syncTimer);
-      socket?.close();
+      socket.close();
     },
   };
 }

@@ -22,7 +22,7 @@ export type LiveFlash = {
   color: string;
 };
 
-export type ClientMessage =
+type ClientMessageBase =
   | { type: "hello"; role: ShowRole; roomId: string }
   | { type: "sync"; t0: number }
   | { type: "play" }
@@ -40,7 +40,13 @@ export type ClientMessage =
   | { type: "reanchor"; startedAtServerMs: number }
   | { type: "flash"; onMs?: number };
 
+export type ClientMessage = ClientMessageBase & { token?: string };
+
 export const PLAY_LEAD_MS = 420;
+/** Playback flash lead used by the operator YouTube loop. Do not change without a two-phone test. */
+export const TRACK_FLASH_LEAD_MS = 170;
+export const TRACK_FLASH_LEAD_MIN_MS = 0;
+export const TRACK_FLASH_LEAD_MAX_MS = 400;
 
 export type ServerMessage =
   | {
@@ -76,17 +82,26 @@ export const defaultShowState = (): ShowState => ({
   startedAtServerMs: null,
   bpm: 120,
   color: "#ffffff",
-  pattern: "beat",
+  pattern: "timeline",
   timeline: [],
 });
 
 export function getShowWsUrl() {
+  return getShowWsUrls()[0] ?? "";
+}
+
+export function getShowWsUrls() {
+  if (typeof window === "undefined") return [];
   if (process.env.NEXT_PUBLIC_SHOW_WS_URL) {
-    return process.env.NEXT_PUBLIC_SHOW_WS_URL;
+    return [process.env.NEXT_PUBLIC_SHOW_WS_URL];
   }
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = window.location.hostname;
+  const pageHost = window.location.host;
   const port = process.env.NEXT_PUBLIC_SHOW_WS_PORT ?? "3202";
-  return `${proto}//${window.location.hostname}:${port}`;
+  if (window.location.protocol === "https:") {
+    return [`wss://${pageHost}/show-ws`, `wss://${host}:${port}`];
+  }
+  return [`ws://${host}:${port}`];
 }
 
 export function getShowHttpUrl(path: string, params?: Record<string, string>) {

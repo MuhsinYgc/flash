@@ -8,7 +8,8 @@
     "dev:show": "npm run dev:show --prefix ../flask-web-api",
     "build": "next build",
     "start": "next start -p 3200",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npx --yes tsx --test lib/show/lock.test.ts"
   },
   "dependencies": {
     "next": "16.2.6",

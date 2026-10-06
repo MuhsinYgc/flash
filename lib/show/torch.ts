@@ -139,8 +139,9 @@ export async function acquireTorch(video?: HTMLVideoElement | null): Promise<Tor
 }
 
 export function torchMessage(reason?: TorchReason) {
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
   if (reason === "insecure") {
-    return "Telefonun flaşı uygun. Safari LED’i yalnız HTTPS’te açar. QR https://192.168.1.70:3200 olmalı; kırmızı uyarıda İlerle / Visit demelisin.";
+    return `Telefonun flaşı uygun. Safari LED’i yalnız HTTPS’te açar. QR ${origin || "bu sitenin https adresini"} olmalı; kırmızı uyarıda İlerle / Visit demelisin.`;
   }
   if (reason === "denied") {
     return "Kamera izni verilmedi. Ayarlar > Safari > Kamera’dan bu siteye izin ver.";

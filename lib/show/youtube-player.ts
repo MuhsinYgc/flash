@@ -86,8 +86,8 @@ export function mountYouTubePlayer(elementId: string, onState: (state: number) =
           return;
         }
         const player = new window.YT!.Player(elementId, {
-          width: "320",
-          height: "180",
+          width: "100%",
+          height: "100%",
           playerVars: {
             autoplay: 0,
             controls: 0,

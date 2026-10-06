@@ -1,5 +1,5 @@
 import {
-  getShowWsUrl,
+  getShowWsUrls,
   type ClientMessage,
   type ServerMessage,
   type ShowRole,
@@ -11,15 +11,24 @@ type Handlers = {
   onClose?: () => void;
 };
 
+type SocketOptions = {
+  token?: string;
+  maxRetries?: number;
+};
+
 export function connectShowSocket(
   role: ShowRole,
   roomId: string,
   handlers: Handlers,
+  options: SocketOptions = {},
 ) {
   let socket: WebSocket | null = null;
   let closed = false;
   let retries = 0;
+  let urlIndex = 0;
   let reconnectTimer = 0;
+  const urls = getShowWsUrls();
+  const maxRetries = options.maxRetries ?? 8;
 
   function send(msg: ClientMessage) {
     if (socket?.readyState === WebSocket.OPEN) {
@@ -28,13 +37,13 @@ export function connectShowSocket(
   }
 
   function open() {
-    if (closed) return;
-    const url = getShowWsUrl();
+    if (closed || urls.length === 0) return;
+    const url = urls[urlIndex % urls.length];
     socket = new WebSocket(url);
 
     socket.onopen = () => {
       retries = 0;
-      send({ type: "hello", role, roomId });
+      send({ type: "hello", role, roomId, token: options.token });
       handlers.onOpen?.();
     };
 
@@ -50,6 +59,8 @@ export function connectShowSocket(
       handlers.onClose?.();
       if (closed) return;
       retries += 1;
+      if (retries >= maxRetries) return;
+      urlIndex += 1;
       const wait = Math.min(4000, 400 * retries);
       reconnectTimer = window.setTimeout(open, wait);
     };

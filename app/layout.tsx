@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Barlow_Condensed, Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,9 +12,16 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const barlowCondensed = Barlow_Condensed({
+  variable: "--font-barlow-condensed",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
+
 export const metadata: Metadata = {
-  title: "Flash",
-  description: "QR-synced phone light show. Operator controls playback; audience joins via QR.",
+  title: "Kipaş İstiklal Basket — Işık Gösterisi",
+  description:
+    "Kipaş İstiklal Basket tribün ışık gösterisi. DJ müziği başlatır, taraftarlar QR ile katılır.",
 };
 
 export default function RootLayout({
@@ -24,10 +31,10 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full font-sans antialiased`}
+      lang="tr"
+      className={`${geistSans.variable} ${geistMono.variable} ${barlowCondensed.variable} h-full font-sans antialiased`}
     >
-      <body className="flex min-h-full flex-col bg-background text-foreground">
+      <body className="stadium-bg flex min-h-full flex-col text-foreground">
         {children}
       </body>
     </html>

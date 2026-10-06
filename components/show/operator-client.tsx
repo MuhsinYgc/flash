@@ -1,8 +1,51 @@
 "use client";
 
+import {
+  IconChevronDown,
+  IconChevronUp,
+  IconClock,
+  IconCopy,
+  IconFlash,
+  IconLink,
+  IconMonitor,
+  IconMusic,
+  IconPause,
+  IconPhone,
+  IconPlay,
+  IconPlus,
+  IconQr,
+  IconSettings,
+  IconSpark,
+  IconSun,
+  IconSkipBack,
+  IconSkipForward,
+  IconTrash,
+  IconUsers,
+  IconWifi,
+} from "@/components/brand/icons";
+import { StatusPill } from "@/components/brand/status-pill";
+import { TeamButton } from "@/components/brand/team-button";
+import { TeamHeader } from "@/components/brand/team-header";
+import { OperatorLogin } from "@/components/show/operator-login";
+import { QR_COLORS, TEAM } from "@/lib/brand/team";
 import { beatsToCues, detectBeats } from "@/lib/show/beat-detect";
 import { connectShow } from "@/lib/show/connect";
-import { getShowHttpUrl, sanitizeRoomId, type ClientMessage } from "@/lib/show/protocol";
+import { detectJoinOrigin, normalizeJoinOrigin } from "@/lib/show/join-origin";
+import {
+  clearOperatorToken,
+  getOperatorToken,
+  loadTrackLeadMs,
+  saveTrackLeadMs,
+  subscribeOperatorToken,
+} from "@/lib/show/operator-session";
+import {
+  TRACK_FLASH_LEAD_MAX_MS,
+  TRACK_FLASH_LEAD_MIN_MS,
+  TRACK_FLASH_LEAD_MS,
+  getShowHttpUrl,
+  sanitizeRoomId,
+  type ClientMessage,
+} from "@/lib/show/protocol";
 import {
   commitPlaylist,
   getPlaylistSnapshot,
@@ -23,15 +66,43 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 type Phase = "idle" | "gap" | "playing";
 type Row = PlaylistRow;
 
-const DEFAULT_PUBLIC_ORIGIN = "https://192.168.1.70:3200";
-const FLASH_LEAD_MS = 170;
 const SEEK_MS = 400;
 const LOOP_MS = 500;
 const CUE_ON_MS = 120;
+const REANCHOR_MIN_MS = 80;
+const REANCHOR_COOLDOWN_MS = 2000;
 
 export function OperatorClient({ roomId }: { roomId: string }) {
+  const token = useSyncExternalStore(subscribeOperatorToken, getOperatorToken, () => "");
+
+  if (!token) {
+    return <OperatorLogin onAuthed={() => undefined} />;
+  }
+
+  return (
+    <OperatorBooth
+      key={token}
+      roomId={roomId}
+      token={token}
+      onLogout={() => {
+        clearOperatorToken();
+      }}
+    />
+  );
+}
+
+function OperatorBooth({
+  roomId,
+  token,
+  onLogout,
+}: {
+  roomId: string;
+  token: string;
+  onLogout: () => void;
+}) {
   const [room, setRoom] = useState(roomId);
-  const [publicOrigin, setPublicOrigin] = useState(DEFAULT_PUBLIC_ORIGIN);
+  const [publicOrigin, setPublicOrigin] = useState("");
+  const [originReady, setOriginReady] = useState(false);
   const [qr, setQr] = useState("");
   const [connected, setConnected] = useState(false);
   const [audienceCount, setAudienceCount] = useState(0);
@@ -48,6 +119,8 @@ export function OperatorClient({ roomId }: { roomId: string }) {
   const [wantPlay, setWantPlay] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [positionMs, setPositionMs] = useState(0);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [flashLeadMs, setFlashLeadMs] = useState(() => loadTrackLeadMs(TRACK_FLASH_LEAD_MS));
 
   const sendRef = useRef<(msg: ClientMessage) => void | Promise<void>>(() => undefined);
   const sessionRef = useRef<ReturnType<typeof connectShow> | null>(null);
@@ -63,14 +136,40 @@ export function OperatorClient({ roomId }: { roomId: string }) {
   const onEndedRef = useRef(() => undefined);
   const clockReadyRef = useRef(false);
   const mountedRef = useRef(true);
+  const flashLeadRef = useRef(flashLeadMs);
+  const lastReanchorRef = useRef(0);
 
-  const origin = normalizeJoinOrigin(publicOrigin) || DEFAULT_PUBLIC_ORIGIN;
+  useEffect(() => {
+    flashLeadRef.current = flashLeadMs;
+  }, [flashLeadMs]);
+
+  const origin = normalizeJoinOrigin(publicOrigin);
   const joinUrl = useMemo(
     () => `${origin}/join?room=${encodeURIComponent(room)}`,
     [origin, room],
   );
   const wrongPort = /:32000\b/.test(publicOrigin);
-  const localhost = origin.includes("localhost") || origin.includes("127.0.0.1");
+  const phoneUnreachable =
+    !origin || origin.includes("localhost") || origin.includes("127.0.0.1");
+
+  async function redetectOrigin() {
+    const detected = await detectJoinOrigin();
+    if (detected) {
+      setPublicOrigin(detected);
+      setOriginReady(true);
+    }
+  }
+
+  async function copyJoinLink() {
+    if (!joinUrl) return;
+    try {
+      await navigator.clipboard.writeText(joinUrl);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      setError("Link kopyalanamadı.");
+    }
+  }
   const selected = playlist.find((track) => track.videoId === selectedId) ?? null;
   const current = playlist.find((track) => track.videoId === currentId) ?? null;
   const readyTracks = playlist.filter((track) => track.status === "ready");
@@ -85,10 +184,23 @@ export function OperatorClient({ roomId }: { roomId: string }) {
 
   useEffect(() => {
     let cancelled = false;
+    void detectJoinOrigin().then((detected) => {
+      if (cancelled || !detected) return;
+      setPublicOrigin(detected);
+      setOriginReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!origin) return;
+    let cancelled = false;
     void QRCode.toDataURL(joinUrl, {
       width: 320,
       margin: 1,
-      color: { dark: "#152028", light: "#ffffff" },
+      color: { dark: QR_COLORS.dark, light: QR_COLORS.light },
     })
       .then((url) => {
         if (!cancelled) setQr(url);
@@ -99,7 +211,7 @@ export function OperatorClient({ roomId }: { roomId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [joinUrl]);
+  }, [joinUrl, origin]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,12 +219,17 @@ export function OperatorClient({ roomId }: { roomId: string }) {
     anchorAtRef.current = null;
     flashedStopRef.current = false;
     clockReadyRef.current = false;
-    const session = connectShow("operator", room, {
-      onConnected: (ok) => setConnected(ok),
-      onState: (_next, count) => setAudienceCount(count),
-      onFlash: () => undefined,
-      onError: (message) => setError(message),
-    });
+    const session = connectShow(
+      "operator",
+      room,
+      {
+        onConnected: (ok) => setConnected(ok),
+        onState: (_next, count) => setAudienceCount(count),
+        onFlash: () => undefined,
+        onError: (message) => setError(message),
+      },
+      { token },
+    );
     sendRef.current = session.send;
     sessionRef.current = session;
     void session.ready.then(() => {
@@ -125,7 +242,7 @@ export function OperatorClient({ roomId }: { roomId: string }) {
       sessionRef.current = null;
       session.close();
     };
-  }, [room]);
+  }, [room, token]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -207,10 +324,11 @@ export function OperatorClient({ roomId }: { roomId: string }) {
       }
       stallRef.current = 0;
 
+      const lead = flashLeadRef.current;
       const serverNow = session.clock.serverNow();
       if (!anchoredRef.current || anchorAtRef.current == null) {
         if (!clockReadyRef.current) return;
-        const startedAtServerMs = Math.round(serverNow - timeMs - FLASH_LEAD_MS);
+        const startedAtServerMs = Math.round(serverNow - timeMs - lead);
         anchorAtRef.current = startedAtServerMs;
         anchoredRef.current = true;
         flashedStopRef.current = false;
@@ -224,11 +342,17 @@ export function OperatorClient({ roomId }: { roomId: string }) {
         return;
       }
 
-      const errorMs = timeMs - (serverNow - anchorAtRef.current - FLASH_LEAD_MS);
+      const errorMs = timeMs - (serverNow - anchorAtRef.current - lead);
       if (Math.abs(errorMs) > SEEK_MS) {
         halt();
         setPhase("gap");
         return;
+      }
+      if (Math.abs(errorMs) >= REANCHOR_MIN_MS && Date.now() - lastReanchorRef.current > REANCHOR_COOLDOWN_MS) {
+        const startedAtServerMs = Math.round(serverNow - timeMs - lead);
+        anchorAtRef.current = startedAtServerMs;
+        lastReanchorRef.current = Date.now();
+        void sendRef.current({ type: "reanchor", startedAtServerMs });
       }
       setPhase((currentPhase) => (currentPhase === "playing" ? currentPhase : "playing"));
     }, LOOP_MS);
@@ -415,210 +539,429 @@ export function OperatorClient({ roomId }: { roomId: string }) {
   }
 
   const screenUrl = `/screen?room=${encodeURIComponent(room)}&origin=${encodeURIComponent(origin)}`;
+  const transportDisabled = !playerReady || readyTracks.length === 0;
+
+  function renderTransport(compact: boolean) {
+    return (
+      <div className={`flex items-center justify-center gap-2 ${compact ? "sm:gap-3" : "sm:gap-4"}`}>
+        <button
+          type="button"
+          className={`booth-transport-btn ${compact ? "min-w-[4.5rem] px-3" : "min-w-[5.5rem] sm:min-w-[6.5rem]"}`}
+          onClick={() => step(-1)}
+          disabled={orderIndex <= 0}
+        >
+          <IconSkipBack className="h-4 w-4" />
+          <span>Önceki</span>
+        </button>
+        <button
+          type="button"
+          className={`booth-play-btn shrink-0 ${compact ? "h-14 w-14" : ""}`}
+          aria-label={wantPlay ? "Duraklat" : "Çal"}
+          onClick={() => {
+            if (wantPlay) pause();
+            else play();
+          }}
+          disabled={transportDisabled}
+        >
+          {wantPlay ? (
+            <IconPause className={compact ? "h-6 w-6" : "h-7 w-7"} />
+          ) : (
+            <IconPlay className={`ml-0.5 ${compact ? "h-6 w-6" : "h-7 w-7"}`} />
+          )}
+        </button>
+        <button
+          type="button"
+          className={`booth-transport-btn ${compact ? "min-w-[4.5rem] px-3" : "min-w-[5.5rem] sm:min-w-[6.5rem]"}`}
+          onClick={() => step(1)}
+          disabled={orderIndex < 0 || orderIndex >= readyTracks.length - 1}
+        >
+          <span>Sonraki</span>
+          <IconSkipForward className="h-4 w-4" />
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <main className="mx-auto flex min-h-full w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-8">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-foreground/50">
-            Operator
-          </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Flaş</h1>
-        </div>
-        <div className="flex flex-wrap gap-2 text-xs font-medium">
-          <Pill ok={connected} label={connected ? "Console live" : "Offline"} />
-          <Pill ok={audienceCount > 0} label={`${audienceCount} phones`} />
-          <Pill
-            ok={phase === "playing"}
-            label={
-              current?.status === "ready"
-                ? `${formatClock(positionMs)} / ${formatClock(current.durationMs)}`
-                : "Durdu"
-            }
-          />
+    <main className="mx-auto flex min-h-full w-full max-w-6xl flex-1 flex-col gap-4 px-3 py-4 pb-24 sm:px-6 sm:py-8 lg:gap-6 lg:pb-8">
+      <header className="card-premium rounded-2xl p-3 sm:p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <TeamHeader subtitle="Işık gösterisi kontrol" logoSize={44} />
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            <StatusPill
+              active={connected}
+              icon={<IconWifi className="h-3.5 w-3.5" />}
+              label={connected ? "Canlı" : "Bağlantı yok"}
+            />
+            <StatusPill
+              active={audienceCount > 0}
+              icon={<IconUsers className="h-3.5 w-3.5" />}
+              label={`${audienceCount} telefon`}
+            />
+            <StatusPill
+              active={phase === "playing"}
+              icon={<IconClock className="h-3.5 w-3.5" />}
+              label={
+                current?.status === "ready"
+                  ? `${formatClock(positionMs)} / ${formatClock(current.durationMs)}`
+                  : "Durdu"
+              }
+            />
+            <TeamButton variant="secondary" className="min-h-9 px-3 text-xs" onClick={onLogout}>
+              Çıkış
+            </TeamButton>
+          </div>
         </div>
       </header>
 
-      <section className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        <article className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="text-sm font-semibold">Audience QR</h2>
-          <p className="mt-1 text-sm text-foreground/70">
-            QR şarkı değişince değişmez. Dev ekranda açık kalsın.
-          </p>
-          <label className="mt-4 block text-xs font-medium text-foreground/60">
-            Public site URL
-            <input
-              value={origin}
-              onChange={(event) => setPublicOrigin(normalizeJoinOrigin(event.target.value))}
-              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-            />
-          </label>
-          <label className="mt-3 block text-xs font-medium text-foreground/60">
-            Room
-            <input
-              value={room}
-              onChange={(event) => setRoom(sanitizeRoomId(event.target.value))}
-              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
-            />
-          </label>
-          {wrongPort ? (
-            <p className="mt-3 text-xs leading-5 text-red-700">
-              Port 32000 yanlis. 3200 olmali: http://192.168.1.70:3200
-            </p>
-          ) : null}
-          {localhost ? (
-            <p className="mt-3 text-xs leading-5 text-foreground/60">
-              Telefona localhost yazma. Kutuyu http://192.168.1.70:3200 olarak bırak, sonra QR’ı oku.
-            </p>
-          ) : null}
-          <div className="mt-4 flex justify-center rounded-xl bg-white p-3">
-            {qr ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={qr} alt="Join QR code" className="h-48 w-48" />
-            ) : (
-              <div className="flex h-48 w-48 items-center justify-center text-xs text-foreground/50">
-                QR unavailable
+      <section className="grid gap-4 lg:grid-cols-[minmax(280px,320px)_1fr] lg:gap-6">
+        <article className="card-premium order-2 overflow-hidden rounded-2xl lg:order-1">
+          <div className="panel-head px-5 py-4">
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-white/15 text-white">
+                <IconQr className="h-5 w-5" />
+              </span>
+              <div>
+                <h2 className="font-display text-sm font-bold uppercase tracking-[0.18em] text-white">
+                  Taraftar QR
+                </h2>
+                <p className="mt-1 text-xs leading-5 text-white/85">
+                  Şarkı değişince QR değişmez. Dev ekranda açık kalsın.
+                </p>
               </div>
-            )}
+            </div>
           </div>
-          <p className="mt-3 break-all text-xs text-foreground/60">{joinUrl}</p>
-          <a
-            href={screenUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-4 flex min-h-11 items-center justify-center rounded-xl bg-accent px-3 py-2 text-sm font-semibold text-white"
-          >
-            Dev ekranda aç
-          </a>
+          <div className="p-5">
+            <div className="mx-auto flex max-w-[13rem] justify-center rounded-2xl bg-team-surface p-4 ring-1 ring-team-border">
+              {qr ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={qr} alt="Katılım QR kodu" className="aspect-square w-full" />
+              ) : (
+                <div className="flex aspect-square w-full items-center justify-center text-center text-xs text-team-muted">
+                  {originReady ? "QR hazırlanıyor…" : "Site adresi algılanıyor…"}
+                </div>
+              )}
+            </div>
+            <p className="mt-4 break-all text-center text-xs text-team-muted">{joinUrl}</p>
+            <a href={screenUrl} target="_blank" rel="noreferrer" className="mt-4 block">
+              <TeamButton icon={<IconMonitor className="h-4 w-4" />} className="w-full">
+                Dev ekranda aç
+              </TeamButton>
+            </a>
+            <TeamButton
+              type="button"
+              variant="secondary"
+              icon={<IconCopy className="h-4 w-4" />}
+              onClick={() => void copyJoinLink()}
+              disabled={!joinUrl}
+              className="mt-2 w-full"
+            >
+              {linkCopied ? "Kopyalandı!" : "Katılım linkini kopyala"}
+            </TeamButton>
+
+            <details className="mt-5 rounded-xl border border-team-border bg-gradient-to-br from-team-red/6 via-team-white to-team-cyan/8 p-4 lg:open">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-team-red [&::-webkit-details-marker]:hidden lg:pointer-events-none">
+                Tribün durumu
+                <span className="font-display text-2xl font-bold text-team-ink lg:hidden">
+                  {audienceCount}
+                </span>
+              </summary>
+              <div className="mt-3 flex items-end justify-between gap-3">
+                <div>
+                  <p className="font-display text-4xl font-bold leading-none text-team-ink">
+                    {audienceCount}
+                  </p>
+                  <p className="mt-1 text-xs text-team-muted">bağlı telefon</p>
+                </div>
+                <div className="flex flex-col items-end gap-1.5">
+                  <StatusPill
+                    active={connected}
+                    icon={<IconWifi className="h-3.5 w-3.5" />}
+                    label={connected ? "Sunucu canlı" : "Bağlantı yok"}
+                  />
+                  <span className="rounded-full bg-team-white px-2.5 py-1 text-xs font-medium text-team-muted ring-1 ring-team-border">
+                    Oda: {room}
+                  </span>
+                </div>
+              </div>
+            </details>
+
+            <details className="mt-4 rounded-xl border border-team-border bg-team-surface/80 p-4">
+              <summary className="flex cursor-pointer list-none items-center gap-2 font-display text-xs font-bold uppercase tracking-[0.14em] text-team-ink [&::-webkit-details-marker]:hidden">
+                <IconSpark className="h-3.5 w-3.5 text-team-cyan" />
+                Taraftar nasıl katılır?
+              </summary>
+              <ol className="mt-3 space-y-2.5 text-xs leading-5 text-team-muted">
+                <li className="flex gap-2.5">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-team-red text-[10px] font-bold text-white">
+                    1
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <IconQr className="h-3.5 w-3.5 shrink-0 text-team-red" />
+                    QR kodu tara veya katılım linkini aç
+                  </span>
+                </li>
+                <li className="flex gap-2.5">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-team-red text-[10px] font-bold text-white">
+                    2
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <IconPhone className="h-3.5 w-3.5 shrink-0 text-team-cyan" />
+                    Kamera ve flaş iznini ver
+                  </span>
+                </li>
+                <li className="flex gap-2.5">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-team-red text-[10px] font-bold text-white">
+                    3
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <IconFlash className="h-3.5 w-3.5 shrink-0 text-team-red" />
+                    Müzik başladığında flaş otomatik senkron olur
+                  </span>
+                </li>
+              </ol>
+            </details>
+
+            <p className="mt-4 hidden text-center font-display text-sm font-semibold uppercase tracking-wide text-team-red lg:block">
+              {TEAM.tagline}
+            </p>
+            <p className="mt-1 hidden text-center text-xs text-team-muted lg:block">{TEAM.instagram}</p>
+
+            <details className="mt-5 rounded-xl border border-team-border bg-team-surface/80 p-3">
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-team-muted [&::-webkit-details-marker]:hidden">
+                <IconSettings className="h-4 w-4 shrink-0 text-team-ink" />
+                Teknik ayarlar
+              </summary>
+              <label className="mt-4 block">
+                <span className="flex items-center gap-2 text-xs font-semibold text-team-ink">
+                  <IconSun className="h-4 w-4 shrink-0 text-team-cyan" />
+                  Site adresi
+                </span>
+                <p className="mt-1 text-xs leading-5 text-team-muted">
+                  Taraftarların telefonla bağlanacağı adres. Yerelde Wi-Fi IP otomatik algılanır;
+                  canlıda alan adınız kullanılır.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    value={origin}
+                    onChange={(event) => {
+                      setOriginReady(true);
+                      setPublicOrigin(normalizeJoinOrigin(event.target.value));
+                    }}
+                    className="min-w-0 flex-1 rounded-lg border border-team-border bg-team-white px-3 py-2 text-sm"
+                  />
+                  <TeamButton
+                    type="button"
+                    variant="secondary"
+                    icon={<IconSun className="h-4 w-4" />}
+                    onClick={() => void redetectOrigin()}
+                    className="shrink-0 px-3"
+                  >
+                    Algıla
+                  </TeamButton>
+                </div>
+              </label>
+              <label className="mt-4 block">
+                <span className="flex items-center gap-2 text-xs font-semibold text-team-ink">
+                  <IconSettings className="h-4 w-4 shrink-0 text-team-muted" />
+                  Oda
+                </span>
+                <input
+                  value={room}
+                  onChange={(event) => setRoom(sanitizeRoomId(event.target.value))}
+                  className="mt-2 w-full rounded-lg border border-team-border bg-team-white px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="mt-4 block">
+                <span className="flex items-center gap-2 text-xs font-semibold text-team-ink">
+                  <IconFlash className="h-4 w-4 shrink-0 text-team-red" />
+                  Flaş ofseti ({flashLeadMs} ms)
+                </span>
+                <p className="mt-1 text-xs leading-5 text-team-muted">
+                  Varsayılan 170 ms. Değiştirmeden mevcut senkron aynı kalır.
+                </p>
+                <input
+                  type="range"
+                  min={TRACK_FLASH_LEAD_MIN_MS}
+                  max={TRACK_FLASH_LEAD_MAX_MS}
+                  value={flashLeadMs}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setFlashLeadMs(next);
+                    saveTrackLeadMs(next);
+                  }}
+                  className="mt-2 w-full"
+                />
+              </label>
+              {wrongPort ? (
+                <p className="mt-3 text-xs leading-5 text-team-red">
+                  Port 32000 yanlış. 3200 olmalı.
+                </p>
+              ) : null}
+              {phoneUnreachable ? (
+                <p className="mt-3 text-xs leading-5 text-team-red">
+                  Telefon localhost ile bağlanamaz. Algıla ile Wi-Fi adresini al veya elle yaz.
+                </p>
+              ) : null}
+            </details>
+          </div>
         </article>
 
-        <article className="rounded-2xl border border-border bg-surface p-5">
-          <h2 className="text-sm font-semibold">Playlist</h2>
-          <p className="mt-1 text-sm text-foreground/70">
-            Link ekle, ritim hazır olunca başlat. Flaş, ses gerçekten çalınca başlar.
+        <article className="card-premium order-1 flex flex-col rounded-2xl p-4 sm:p-6 lg:order-2">
+          <div className="flex items-start gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-team-red/10 text-team-red">
+              <IconMusic className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <h2 className="font-display text-xl font-bold uppercase tracking-wide text-team-ink">
+                Müzik listesi
+              </h2>
+              <p className="mt-1 text-sm text-team-muted">
+                Link ekle, ritim hazır olunca başlat. Flaş ses gerçekten çalınca başlar.
+              </p>
+            </div>
+          </div>
+          <p className="mt-4 inline-flex items-center gap-2 rounded-full bg-team-red/8 px-3 py-1.5 text-sm font-semibold text-team-red">
+            {wantPlay && phase === "playing" ? (
+              <IconPlay className="h-3.5 w-3.5" />
+            ) : (
+              <IconClock className="h-3.5 w-3.5" />
+            )}
+            {statusLabel(phase, wantPlay, playerReady)}
           </p>
-          <p className="mt-2 text-sm font-medium">{statusLabel(phase, wantPlay, playerReady)}</p>
 
           <form
-            className="mt-4 flex gap-2"
+            className="mt-4 flex flex-col gap-2 sm:flex-row"
             onSubmit={(event) => {
               event.preventDefault();
               void addLink(draft);
             }}
           >
-            <input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder="YouTube linki"
-              className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
-            />
-            <button
-              type="submit"
-              className="rounded-xl bg-accent px-4 py-2 text-sm font-semibold text-white"
-            >
+            <div className="relative min-w-0 flex-1">
+              <IconLink className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-team-muted" />
+              <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="YouTube linki"
+                className="w-full rounded-xl border border-team-border bg-team-surface py-2.5 pr-3 pl-10 text-sm outline-none ring-team-cyan/40 focus:border-team-cyan focus:ring-2"
+              />
+            </div>
+            <TeamButton type="submit" icon={<IconPlus className="h-4 w-4" />} className="sm:min-w-[7rem]">
               Ekle
-            </button>
+            </TeamButton>
           </form>
 
+          <div className="booth-deck order-2 mt-5 overflow-hidden rounded-2xl lg:order-3">
+            <div className="panel-head flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
+              <div className="flex min-w-0 items-center gap-2">
+                <IconMusic className="h-4 w-4 shrink-0 text-white/90" />
+                <span className="font-display text-xs font-bold uppercase tracking-[0.16em] text-white">
+                  Kabin oynatıcı
+                </span>
+              </div>
+              <span className="truncate text-right text-xs font-medium text-white/85">
+                {current?.title ?? selected?.title ?? "Parça seç"}
+              </span>
+            </div>
+
+            <div className="booth-deck-body px-3 py-4 sm:px-6 sm:py-6">
+              <div className="mx-auto max-w-xl">
+                <div className="booth-player-frame mx-auto aspect-video w-full max-w-[32rem] bg-black">
+                  <div id="booth-player" className="h-full w-full" />
+                </div>
+
+                {current?.status === "ready" && wantPlay ? (
+                  <p className="mt-3 text-center font-mono text-xs tracking-wide text-team-muted">
+                    {formatClock(positionMs)} / {formatClock(current.durationMs)}
+                  </p>
+                ) : null}
+
+                <div className="mt-4 hidden lg:block">{renderTransport(false)}</div>
+              </div>
+            </div>
+
+            <p className="hidden border-t border-team-border px-4 py-3 text-center text-xs text-team-muted lg:block">
+              Kabin sesi bu oynatıcıdan çıkar — tribün flaşı müzikle senkron başlar
+            </p>
+          </div>
+
           {playlist.length === 0 ? (
-            <p className="mt-4 text-sm text-foreground/60">Liste boş.</p>
+            <p className="order-3 mt-4 text-sm text-team-muted lg:order-2">Liste boş.</p>
           ) : (
-            <ul className="mt-4 flex flex-col gap-2">
-              {playlist.map((track, index) => (
-                <li
-                  key={track.videoId}
-                  className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${
-                    track.videoId === selectedId ? "border-accent bg-accent/10" : "border-border"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setSelectedId(track.videoId)}
-                    className="min-w-0 flex-1 text-left"
+            <div className="playlist-scroll order-3 mt-4 lg:order-2">
+              <ul className="flex flex-col gap-2">
+                {playlist.map((track, index) => (
+                  <li
+                    key={track.videoId}
+                    className={`flex min-w-0 items-center gap-2 rounded-xl border px-3 py-3 sm:gap-3 ${
+                      track.videoId === selectedId
+                        ? "border-team-red bg-team-red/8 shadow-sm shadow-team-red/10"
+                        : "border-team-border bg-team-white"
+                    }`}
                   >
-                    <span className="block truncate text-sm font-semibold">{track.title}</span>
-                    <span className="block text-xs text-foreground/60">
-                      {track.status === "analyzing"
-                        ? "Ritim hazırlanıyor…"
-                        : track.status === "error"
-                          ? track.error
-                          : `${formatClock(track.durationMs)}${
-                              track.videoId === currentId && wantPlay ? " · çalıyor" : ""
-                            }`}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => moveTrack(track.videoId, -1)}
-                    disabled={index === 0}
-                    className="rounded-lg border border-border px-2 py-1 text-xs disabled:opacity-40"
-                  >
-                    Yukarı
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => moveTrack(track.videoId, 1)}
-                    disabled={index === playlist.length - 1}
-                    className="rounded-lg border border-border px-2 py-1 text-xs disabled:opacity-40"
-                  >
-                    Aşağı
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => removeTrack(track.videoId)}
-                    className="rounded-lg border border-border px-2 py-1 text-xs"
-                  >
-                    Sil
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(track.videoId)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <span className="block truncate text-sm font-semibold text-team-ink">
+                        {track.title}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-team-muted">
+                        {track.status === "analyzing"
+                          ? "Ritim hazırlanıyor…"
+                          : track.status === "error"
+                            ? track.error
+                            : `${formatClock(track.durationMs)}${
+                                track.videoId === currentId && wantPlay ? " · çalıyor" : ""
+                              }`}
+                      </span>
+                    </button>
+                    <div className="flex shrink-0 items-center gap-1">
+                      <TeamButton
+                        variant="icon"
+                        aria-label="Yukarı taşı"
+                        onClick={() => moveTrack(track.videoId, -1)}
+                        disabled={index === 0}
+                      >
+                        <IconChevronUp className="h-4 w-4" />
+                      </TeamButton>
+                      <TeamButton
+                        variant="icon"
+                        aria-label="Aşağı taşı"
+                        onClick={() => moveTrack(track.videoId, 1)}
+                        disabled={index === playlist.length - 1}
+                      >
+                        <IconChevronDown className="h-4 w-4" />
+                      </TeamButton>
+                      <TeamButton
+                        variant="icon"
+                        aria-label="Sil"
+                        onClick={() => removeTrack(track.videoId)}
+                        className="text-team-red hover:border-team-red/40 hover:bg-team-red/10"
+                      >
+                        <IconTrash className="h-4 w-4" />
+                      </TeamButton>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
-          <div className="mt-5 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => step(-1)}
-              disabled={orderIndex <= 0}
-              className="rounded-xl border border-border px-3 py-2.5 text-sm font-semibold disabled:opacity-40"
-            >
-              Önceki
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (wantPlay) pause();
-                else play();
-              }}
-              disabled={!playerReady || readyTracks.length === 0}
-              className="rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-            >
-              {wantPlay ? "Duraklat" : "Çal"}
-            </button>
-            <button
-              type="button"
-              onClick={() => step(1)}
-              disabled={orderIndex < 0 || orderIndex >= readyTracks.length - 1}
-              className="rounded-xl border border-border px-3 py-2.5 text-sm font-semibold disabled:opacity-40"
-            >
-              Sonraki
-            </button>
-          </div>
-
-          <div className="mt-5 min-h-[180px] overflow-hidden rounded-xl bg-black">
-            <div id="booth-player" />
-          </div>
-          <p className="mt-2 text-xs text-foreground/60">Kabin sesi bu oynatıcıdan çıkar.</p>
           {selected?.status === "analyzing" ? (
-            <p className="mt-3 text-sm text-foreground/70">Ritim hazırlanıyor…</p>
+            <p className="mt-3 text-sm text-team-muted">Ritim hazırlanıyor…</p>
           ) : null}
-          {error ? <p className="mt-4 text-sm text-red-700">{error}</p> : null}
+          {error ? <p className="mt-4 text-sm text-team-red">{error}</p> : null}
         </article>
       </section>
+
+      <div className="operator-sticky-bar lg:hidden">
+        {renderTransport(true)}
+      </div>
     </main>
   );
 }
-
 function statusLabel(phase: Phase, wantPlay: boolean, playerReady: boolean) {
   if (!playerReady) return "Oynatıcı hazırlanıyor";
   if (phase === "playing") return "Çalıyor";
@@ -635,31 +978,6 @@ async function decodeAudio(bytes: ArrayBuffer) {
     throw new Error("Bu parçanın sesi okunamadı.");
   } finally {
     await ctx.close();
-  }
-}
-
-function Pill({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <span
-      className={`rounded-full px-2.5 py-1 ${
-        ok ? "bg-accent/10 text-accent" : "bg-background text-foreground/60"
-      }`}
-    >
-      {label}
-    </span>
-  );
-}
-
-function normalizeJoinOrigin(value: string) {
-  const trimmed = value.trim().replace(/\/$/, "");
-  if (!trimmed) return "";
-  const withProtocol = trimmed.includes("://") ? trimmed : `http://${trimmed}`;
-  try {
-    const url = new URL(withProtocol);
-    if (url.port === "32000" || url.port === "320") url.port = "3200";
-    return url.origin;
-  } catch {
-    return trimmed.replace(":32000", ":3200");
   }
 }
 

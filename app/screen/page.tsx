@@ -4,8 +4,8 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 
 export const metadata: Metadata = {
-  title: "Flaş ekranı",
-  description: "Dev ekranda gösterilecek katılım QR’ı.",
+  title: "Kipaş İstiklal — Dev Ekran",
+  description: "Salon dev ekranı için Kipaş İstiklal Basket katılım QR’ı.",
 };
 
 function sanitizeOrigin(value: string | undefined) {

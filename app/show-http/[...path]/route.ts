@@ -2,6 +2,8 @@ const showOrigin = `http://127.0.0.1:${process.env.SHOW_WS_PORT ?? "3202"}`;
 
 export const dynamic = "force-dynamic";
 
+/** Fallback when next.config rewrites do not apply. Keep snapshot/command behavior identical. */
+
 async function proxy(request: Request, path: string[]) {
   const incoming = new URL(request.url);
   const target = `${showOrigin}/${path.join("/")}${incoming.search}`;

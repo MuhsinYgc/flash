@@ -3,8 +3,8 @@ import { sanitizeRoomId } from "@/lib/show/protocol";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Join the light show",
-  description: "Scan in and keep this tab open. Your screen and flashlight follow the show.",
+  title: "Kipaş İstiklal — Katıl",
+  description: "Kipaş İstiklal Basket tribün ışık gösterisine katıl.",
 };
 
 export default async function JoinPage({

@@ -22,7 +22,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/show-http/:path*",
-        destination: `http://127.0.0.1:${process.env.SHOW_WS_PORT ?? "3202"}/:path*`,
+        destination: `${(process.env.SHOW_SERVER_ORIGIN ?? `http://127.0.0.1:${process.env.SHOW_WS_PORT ?? "3202"}`).replace(/\/$/, "")}/:path*`,
       },
     ];
   },

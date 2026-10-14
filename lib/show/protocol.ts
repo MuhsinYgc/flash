@@ -48,6 +48,11 @@ export const TRACK_FLASH_LEAD_MS = 170;
 export const TRACK_FLASH_LEAD_MIN_MS = 0;
 export const TRACK_FLASH_LEAD_MAX_MS = 400;
 
+/** Audience LED lag compensation (ms added to server clock when deciding on/off). */
+export const AUDIENCE_TORCH_LEAD_DEFAULT_MS = 0;
+export const AUDIENCE_TORCH_LEAD_ANDROID_MS = 275;
+export const AUDIENCE_TORCH_LEAD_MAX_MS = 420;
+
 export type ServerMessage =
   | {
       type: "welcome";
@@ -99,7 +104,7 @@ export function getShowWsUrls() {
   const pageHost = window.location.host;
   const port = process.env.NEXT_PUBLIC_SHOW_WS_PORT ?? "3202";
   if (window.location.protocol === "https:") {
-    return [`wss://${pageHost}/show-ws`, `wss://${host}:${port}`];
+    return [`wss://${pageHost}/show-ws`];
   }
   return [`ws://${host}:${port}`];
 }

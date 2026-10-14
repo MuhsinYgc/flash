@@ -13,6 +13,17 @@ export function createClockSync() {
     return at + offsetMs;
   }
 
+  function handleInstant(serverNowMs: number, clientNowMs = Date.now()) {
+    const offset = serverNowMs - clientNowMs;
+    if (!Number.isFinite(offset)) return;
+    if (samples.length === 0) {
+      offsetMs = offset;
+      return;
+    }
+    samples.push({ offset, rtt: 0 });
+    if (samples.length > 24) samples.shift();
+  }
+
   function handlePong(msg: Extract<ServerMessage, { type: "pong" }>) {
     const t3 = Date.now();
     const t0 = Number(msg.t0) || 0;
@@ -69,6 +80,7 @@ export function createClockSync() {
 
   return {
     serverNow,
+    handleInstant,
     handlePong,
     calibrate,
     get offsetMs() {

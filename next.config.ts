@@ -1,20 +1,19 @@
+import os from "os";
 import path from "path";
 import type { NextConfig } from "next";
 
+function devLanOrigins() {
+  const hosts = new Set<string>(["localhost", "127.0.0.1"]);
+  for (const iface of Object.values(os.networkInterfaces())) {
+    for (const addr of iface ?? []) {
+      if (addr.family === "IPv4" && !addr.internal) hosts.add(addr.address);
+    }
+  }
+  return [...hosts];
+}
+
 const nextConfig: NextConfig = {
-  allowedDevOrigins: [
-    "localhost",
-    "127.0.0.1",
-    "192.168.*.*",
-    "10.*.*.*",
-    "172.16.*.*",
-    "172.17.*.*",
-    "172.18.*.*",
-    "172.19.*.*",
-    "172.2*.*.*",
-    "172.30.*.*",
-    "172.31.*.*",
-  ],
+  allowedDevOrigins: devLanOrigins(),
   turbopack: {
     root: path.join(__dirname),
   },

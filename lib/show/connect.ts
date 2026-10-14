@@ -51,6 +51,9 @@ export function connectShow(
 
   function handleMessage(msg: ServerMessage) {
     if (msg.type === "welcome" || msg.type === "state") {
+      if (typeof msg.serverNow === "number") {
+        clock.handleInstant(msg.serverNow);
+      }
       handlers.onState(msg.state, msg.audienceCount);
     }
     if (msg.type === "flash") {
@@ -81,9 +84,16 @@ export function connectShow(
     },
     {
       token: options.token,
-      maxRetries: securePage ? 2 : 8,
+      maxRetries: securePage ? 6 : 8,
     },
   );
+
+  const connectProbeTimer = window.setTimeout(() => {
+    if (closed || wsUp || httpUp) return;
+    handlers.onError?.(
+      "Sunucuya bağlanılamıyor. flash-api (port 3202) çalışıyor mu? Telefon aynı Wi‑Fi’de ve QR’daki IP adresiyle (localhost değil) açılmış olmalı.",
+    );
+  }, 12_000);
 
   function httpUrls(path: string, params: Record<string, string>) {
     const sameOrigin = getShowHttpUrl(path, params);
@@ -106,7 +116,7 @@ export function connectShow(
   }
 
   async function poll() {
-    if (closed || wsUp) return;
+    if (closed) return;
     const t0 = Date.now();
     const params: Record<string, string> = {
       room: roomId,
@@ -123,6 +133,7 @@ export function connectShow(
     const data = (await res.json()) as {
       state: ShowState;
       audienceCount: number;
+      serverNow?: number;
       t1?: number;
       t2?: number;
       flashes?: Extract<ServerMessage, { type: "flash" }>[];
@@ -132,7 +143,12 @@ export function connectShow(
     if (typeof data.t1 === "number") {
       handleMessage({ type: "pong", t0, t1: data.t1, t2: data.t2 ?? data.t1 });
     }
-    handlers.onState(data.state, data.audienceCount);
+    handleMessage({
+      type: "state",
+      state: data.state,
+      audienceCount: data.audienceCount,
+      serverNow: typeof data.serverNow === "number" ? data.serverNow : Date.now(),
+    });
     for (const flash of data.flashes ?? []) {
       handleMessage({ ...flash, type: "flash" });
     }
@@ -153,7 +169,7 @@ export function connectShow(
     return clock.offsetMs;
   }
 
-  const ready = calibrate();
+  const ready = calibrate().catch(() => clock.offsetMs);
   void poll();
   pollTimer = window.setInterval(() => {
     void poll();
@@ -184,6 +200,7 @@ export function connectShow(
     ready,
     close() {
       closed = true;
+      window.clearTimeout(connectProbeTimer);
       window.clearInterval(pollTimer);
       window.clearInterval(syncTimer);
       socket.close();

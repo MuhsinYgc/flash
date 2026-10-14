@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --experimental-https --experimental-https-key ./certificates/localhost-key.pem --experimental-https-cert ./certificates/localhost.pem --webpack -p 3200",
+    "dev": "node scripts/dev-https.mjs",
+    "dev:next": "next dev --experimental-https --experimental-https-key ./certificates/localhost-key.pem --experimental-https-cert ./certificates/localhost.pem --webpack -p 3200",
     "dev:api": "npm run dev:all --prefix ../flask-web-api",
     "dev:show": "npm run dev:show --prefix ../flask-web-api",
     "build": "next build",
@@ -25,7 +26,9 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
+    "http-proxy": "^1.18.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "ws": "^8.22.0"
   }
 }

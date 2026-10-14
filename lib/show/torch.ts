@@ -1,11 +1,12 @@
 type TorchCapabilities = MediaTrackCapabilities & { torch?: boolean };
-type TorchSettings = MediaTrackSettings & { torch?: boolean };
 
 export type TorchReason = "insecure" | "no-api" | "denied" | "timeout" | "no-torch";
 
 export type TorchControl = {
   supported: boolean;
   reason?: TorchReason;
+  /** Estimated ms to fire LED after applyConstraints (for sync lead). */
+  torchLeadMs: number;
   setTorch: (on: boolean) => Promise<void>;
   attach: (video: HTMLVideoElement | null) => void;
   stop: () => void;
@@ -15,6 +16,7 @@ function empty(reason?: TorchReason): TorchControl {
   return {
     supported: false,
     reason,
+    torchLeadMs: 0,
     setTorch: async () => undefined,
     attach: () => undefined,
     stop: () => undefined,
@@ -41,24 +43,7 @@ async function requestCamera() {
 async function probeTorch(track: MediaStreamTrack) {
   const caps = (track.getCapabilities?.() ?? {}) as TorchCapabilities;
   if (caps.torch) return true;
-  try {
-    await track.applyConstraints({
-      advanced: [{ torch: true } as MediaTrackConstraintSet],
-    });
-    const on = ((track.getSettings?.() ?? {}) as TorchSettings).torch;
-    await track.applyConstraints({
-      advanced: [{ torch: false } as MediaTrackConstraintSet],
-    });
-    return on !== false;
-  } catch {
-    try {
-      await track.applyConstraints({ torch: true } as MediaTrackConstraintSet);
-      await track.applyConstraints({ torch: false } as MediaTrackConstraintSet);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+  return typeof track.applyConstraints === "function";
 }
 
 export async function acquireTorch(video?: HTMLVideoElement | null): Promise<TorchControl> {
@@ -97,8 +82,22 @@ export async function acquireTorch(video?: HTMLVideoElement | null): Promise<Tor
     return empty("no-torch");
   }
 
+  const torchLeadMs = 0;
+
   let desired = false;
   let inflight = false;
+  let onAppliedAt = 0;
+  const latchMs = 110;
+
+  async function writeTorch(on: boolean) {
+    try {
+      await track.applyConstraints({
+        advanced: [{ torch: on } as MediaTrackConstraintSet],
+      });
+    } catch {
+      await track.applyConstraints({ torch: on } as MediaTrackConstraintSet);
+    }
+  }
 
   async function apply(on: boolean) {
     desired = on;
@@ -107,13 +106,17 @@ export async function acquireTorch(video?: HTMLVideoElement | null): Promise<Tor
     try {
       while (true) {
         const target = desired;
-        try {
-          await track.applyConstraints({
-            advanced: [{ torch: target } as MediaTrackConstraintSet],
-          });
-        } catch {
-          await track.applyConstraints({ torch: target } as MediaTrackConstraintSet);
+        if (!target && onAppliedAt > 0) {
+          const wait = latchMs - (performance.now() - onAppliedAt);
+          if (wait > 0) {
+            await new Promise((resolve) => {
+              window.setTimeout(resolve, wait);
+            });
+            if (desired) continue;
+          }
         }
+        await writeTorch(target);
+        if (target) onAppliedAt = performance.now();
         if (desired === target) break;
       }
     } catch {
@@ -125,6 +128,7 @@ export async function acquireTorch(video?: HTMLVideoElement | null): Promise<Tor
 
   return {
     supported: true,
+    torchLeadMs,
     setTorch: apply,
     attach(nextVideo) {
       if (!nextVideo) return;

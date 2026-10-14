@@ -27,8 +27,10 @@ export function connectShowSocket(
   let retries = 0;
   let urlIndex = 0;
   let reconnectTimer = 0;
+  let connectTimer = 0;
   const urls = getShowWsUrls();
   const maxRetries = options.maxRetries ?? 8;
+  const connectTimeoutMs = 5000;
 
   function send(msg: ClientMessage) {
     if (socket?.readyState === WebSocket.OPEN) {
@@ -36,12 +38,26 @@ export function connectShowSocket(
     }
   }
 
+  function clearConnectTimer() {
+    if (connectTimer) {
+      window.clearTimeout(connectTimer);
+      connectTimer = 0;
+    }
+  }
+
   function open() {
     if (closed || urls.length === 0) return;
     const url = urls[urlIndex % urls.length];
     socket = new WebSocket(url);
+    clearConnectTimer();
+    connectTimer = window.setTimeout(() => {
+      if (socket?.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+    }, connectTimeoutMs);
 
     socket.onopen = () => {
+      clearConnectTimer();
       retries = 0;
       send({ type: "hello", role, roomId, token: options.token });
       handlers.onOpen?.();
@@ -56,6 +72,7 @@ export function connectShowSocket(
     };
 
     socket.onclose = () => {
+      clearConnectTimer();
       handlers.onClose?.();
       if (closed) return;
       retries += 1;
@@ -76,6 +93,7 @@ export function connectShowSocket(
     send,
     close() {
       closed = true;
+      clearConnectTimer();
       window.clearTimeout(reconnectTimer);
       socket?.close();
     },

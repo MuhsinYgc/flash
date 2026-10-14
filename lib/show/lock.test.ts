@@ -15,6 +15,18 @@ describe("sync lock", () => {
     assert.equal(result.on, false);
   });
 
+  it("stays dark until the operator starts playback", () => {
+    const now = Date.now();
+    const state = {
+      ...defaultShowState(),
+      playing: false,
+      startedAtServerMs: now - 1000,
+      pattern: "timeline" as const,
+      timeline: [{ atMs: 0, onMs: 500 }],
+    };
+    assert.equal(isLit(state, now, [{ atServerMs: now - 10, onMs: 200, color: "#fff" }]).on, false);
+  });
+
   it("lights a timeline cue at the anchored show time", () => {
     const started = 1_000_000;
     const state = {

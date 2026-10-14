@@ -28,6 +28,10 @@ export function isLit(
   serverNow: number,
   liveFlashes: LiveFlash[],
 ): { on: boolean; color: string } {
+  if (!state.playing || state.startedAtServerMs == null) {
+    return { on: false, color: state.color };
+  }
+
   for (const flash of liveFlashes) {
     if (serverNow >= flash.atServerMs && serverNow < flash.atServerMs + flash.onMs) {
       return { on: true, color: flash.color };

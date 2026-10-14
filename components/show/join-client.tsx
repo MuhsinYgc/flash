@@ -14,6 +14,7 @@ import { connectShow } from "@/lib/show/connect";
 import { createGovernor } from "@/lib/show/flash-governor";
 import { defaultShowState, type LiveFlash, type ShowState } from "@/lib/show/protocol";
 import { isLit } from "@/lib/show/timeline-player";
+import { combineTorchLeadMs, platformTorchLeadMs } from "@/lib/show/torch-lead";
 import { acquireTorch, torchMessage, type TorchControl } from "@/lib/show/torch";
 import { useEffect, useRef, useState } from "react";
 
@@ -41,11 +42,15 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
   const [torchBusy, setTorchBusy] = useState(false);
   const [connected, setConnected] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [screenLit, setScreenLit] = useState(false);
+  const [screenColor, setScreenColor] = useState("#ffffff");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const torchRef = useRef<TorchControl | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const litRef = useRef(false);
+  const torchLeadRef = useRef(platformTorchLeadMs());
+  const sessionRef = useRef<ReturnType<typeof connectShow> | null>(null);
 
   useEffect(() => {
     if (!joined) return;
@@ -55,26 +60,25 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
     const liveFlashes: LiveFlash[] = [];
     let frame = 0;
     let cancelled = false;
-    let blocked = false;
-
-    function applyLight(on: boolean) {
-      if (on && !litRef.current) {
-        if (blocked) return;
-        if (!governor.allow(performance.now())) {
-          blocked = true;
-          return;
-        }
+    let offFrames = 0;
+    function applyLight(screenOn: boolean, torchOn: boolean, color: string, markMs: number) {
+      setScreenLit(screenOn);
+      setScreenColor(color);
+      if (torchOn) {
+        offFrames = 0;
+        if (litRef.current) return;
+        if (!governor.allow(markMs)) return;
         litRef.current = true;
         setTorchOn(true);
         void torchRef.current?.setTorch(true);
         return;
       }
-      if (!on && (litRef.current || blocked)) {
-        blocked = false;
-        litRef.current = false;
-        setTorchOn(false);
-        void torchRef.current?.setTorch(false);
-      }
+      if (!litRef.current) return;
+      offFrames += 1;
+      if (offFrames < 3) return;
+      litRef.current = false;
+      setTorchOn(false);
+      void torchRef.current?.setTorch(false);
     }
 
     requestFullscreen();
@@ -104,12 +108,21 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
       },
       onError: (message) => setError(message),
     });
+    sessionRef.current = session;
 
     function tick() {
-      const now = session.clock.serverNow();
-      const next = isLit(state, now, liveFlashes);
-      applyLight(next.on);
-      const cutoff = now - 2000;
+      const serverNow = session.clock.serverNow();
+      const started = state.playing && state.startedAtServerMs != null && serverNow >= state.startedAtServerMs;
+      if (!started) {
+        offFrames = 3;
+        applyLight(false, false, state.color, serverNow);
+      } else {
+        const screen = isLit(state, serverNow, liveFlashes);
+        const lead = torchLeadRef.current;
+        const torch = isLit(state, serverNow + lead, liveFlashes);
+        applyLight(screen.on, torch.on, screen.color, serverNow + lead);
+      }
+      const cutoff = serverNow - 2000;
       for (let i = liveFlashes.length - 1; i >= 0; i -= 1) {
         if (liveFlashes[i].atServerMs + liveFlashes[i].onMs < cutoff) {
           liveFlashes.splice(i, 1);
@@ -124,12 +137,18 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
       cancelled = true;
       window.cancelAnimationFrame(frame);
       session.close();
+      sessionRef.current = null;
       torchRef.current?.stop();
       torchRef.current = null;
       void wakeLockRef.current?.release();
       wakeLockRef.current = null;
     };
   }, [joined, roomId]);
+
+  useEffect(() => {
+    if (!joined || !connected || torchBusy || torchSupported === true) return;
+    void enableTorch();
+  }, [joined, connected, torchBusy, torchSupported]);
 
   async function enableTorch() {
     setTorchBusy(true);
@@ -138,6 +157,8 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
       const torch = await acquireTorch(videoRef.current);
       torchRef.current = torch;
       torch.attach(videoRef.current);
+      torchLeadRef.current = combineTorchLeadMs(torch.torchLeadMs);
+      await sessionRef.current?.calibrate();
       setTorchSupported(torch.supported);
       if (!torch.supported) {
         setError(torchMessage(torch.reason));
@@ -207,6 +228,13 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
         muted
         playsInline
         className="pointer-events-none absolute h-px w-px opacity-0"
+      />
+      <div
+        className={`pointer-events-none fixed inset-0 z-40 transition-opacity duration-75 ${
+          screenLit ? "opacity-95" : "opacity-0"
+        }`}
+        style={{ backgroundColor: screenColor }}
+        aria-hidden
       />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(237,28,36,0.18),transparent_55%)]" />
       <div className="relative flex flex-1 flex-col items-center justify-center px-5 py-10 text-center text-white">

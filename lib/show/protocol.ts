@@ -78,15 +78,18 @@ export type ServerMessage =
       roomId: string;
       serverNow: number;
       state: ShowState;
+      version?: number;
       audienceCount: number;
     }
   | { type: "pong"; t0: number; t1: number; t2: number }
   | {
       type: "state";
       state: ShowState;
+      version?: number;
       audienceCount: number;
       serverNow: number;
     }
+  | { type: "anchor"; startedAtServerMs: number; version: number; serverNow: number }
   | { type: "flash"; atServerMs: number; onMs: number; color: string }
   | AudienceTorchHit
   | { type: "error"; message: string };
@@ -126,6 +129,15 @@ export function getShowWsUrls() {
     return [`wss://${pageHost}/show-ws`];
   }
   return [`ws://${host}:${port}`];
+}
+
+/** Show server origin for direct browser → API calls (skips the Vercel proxy). Null in local dev. */
+export function getShowDirectOrigin() {
+  const explicit = process.env.NEXT_PUBLIC_SHOW_HTTP_URL;
+  if (explicit) return explicit.replace(/\/$/, "");
+  const ws = process.env.NEXT_PUBLIC_SHOW_WS_URL;
+  if (!ws) return null;
+  return ws.replace(/^ws(s?):\/\//, "http$1://").replace(/\/$/, "");
 }
 
 export function getShowHttpUrl(path: string, params?: Record<string, string>) {

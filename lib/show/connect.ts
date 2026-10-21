@@ -1,5 +1,6 @@
 import { createClockSync } from "./clock-sync";
 import {
+  getShowDirectOrigin,
   getShowHttpUrl,
   type AudienceTorchHit,
   type ClientMessage,
@@ -38,14 +39,19 @@ export function connectShow(
   let wsUp = false;
   let httpUp = false;
   let pollTimer = 0;
-  let backupPollTimer = 0;
   let syncTimer = 0;
   let pollInFlight = false;
+  let lastState: ShowState | null = null;
+  let lastCount = 0;
+  let knownVersion = 0;
   const securePage = window.location.protocol === "https:";
-  const HTTP_POLL_MS = 500;
-  const HTTP_BACKUP_POLL_MS = 1200;
-  const AUDIENCE_SNAPSHOT_MS = 500;
+  const directOrigin = getShowDirectOrigin();
+  const POLL_TICK_MS = 250;
+  const HTTP_POLL_MS = role === "operator" ? 500 : 1000;
+  // With WS up the snapshot only catches missed broadcasts; at 1000 phones this is ~250 req/s.
+  const WS_BACKUP_POLL_MS = role === "operator" ? 5000 : 4000;
   const HTTP_SYNC_MS = 4000;
+  let lastPollAt = 0;
 
   function markConnected() {
     handlers.onConnected(wsUp || httpUp);
@@ -57,13 +63,30 @@ export function connectShow(
     }
   }
 
+  function applyState(state: ShowState, count: number, version?: number) {
+    lastState = state;
+    lastCount = count;
+    if (typeof version === "number") knownVersion = version;
+    handlers.onState(state, count);
+  }
+
   function handleMessage(msg: ServerMessage) {
     if (msg.type === "welcome" || msg.type === "state") {
       // Only seed clock on welcome; snapshot serverNow over HTTP skews offset (esp. on backup poll).
       if (msg.type === "welcome" && typeof msg.serverNow === "number") {
         clock.handleInstant(msg.serverNow);
       }
-      handlers.onState(msg.state, msg.audienceCount);
+      applyState(msg.state, msg.audienceCount, msg.version);
+    }
+    if (msg.type === "anchor") {
+      if (!lastState) {
+        knownVersion = 0;
+        return;
+      }
+      // A gap means we missed a full state broadcast; the next snapshot must resend it.
+      knownVersion = msg.version === knownVersion + 1 ? msg.version : 0;
+      lastState = { ...lastState, startedAtServerMs: msg.startedAtServerMs };
+      handlers.onState(lastState, lastCount);
     }
     if (msg.type === "flash") {
       const key = `${msg.atServerMs}:${msg.onMs}:${msg.color}`;
@@ -109,10 +132,10 @@ export function connectShow(
 
   function httpUrls(path: string, params: Record<string, string>) {
     const sameOrigin = getShowHttpUrl(path, params);
-    if (securePage) return [sameOrigin];
     const query = new URLSearchParams(params).toString();
-    const direct = `http://${window.location.hostname}:3202${path}?${query}`;
-    return [sameOrigin, direct];
+    if (directOrigin) return [`${directOrigin}${path}?${query}`, sameOrigin];
+    if (securePage) return [sameOrigin];
+    return [sameOrigin, `http://${window.location.hostname}:3202${path}?${query}`];
   }
 
   async function fetchFirst(urls: string[]) {
@@ -127,18 +150,20 @@ export function connectShow(
     return null;
   }
 
-  async function poll(allowWhileWs = false) {
+  async function poll() {
     if (closed || pollInFlight) return;
-    if (wsUp && !allowWhileWs) return;
     pollInFlight = true;
+    lastPollAt = Date.now();
     try {
       const t0 = Date.now();
       const params: Record<string, string> = {
         room: roomId,
         clientId: httpId,
         t0: String(t0),
+        v: String(knownVersion),
       };
       if (role === "operator") params.role = "operator";
+      if (wsUp) params.ws = "1";
       const res = await fetchFirst(httpUrls("/snapshot", params));
       if (!res) {
         httpUp = false;
@@ -146,9 +171,9 @@ export function connectShow(
         return;
       }
       const data = (await res.json()) as {
-        state: ShowState;
+        state: ShowState | null;
+        version?: number;
         audienceCount: number;
-        serverNow?: number;
         t1?: number;
         t2?: number;
         flashes?: Extract<ServerMessage, { type: "flash" }>[];
@@ -158,12 +183,11 @@ export function connectShow(
       if (typeof data.t1 === "number") {
         handleMessage({ type: "pong", t0, t1: data.t1, t2: data.t2 ?? data.t1 });
       }
-      handleMessage({
-        type: "state",
-        state: data.state,
-        audienceCount: data.audienceCount,
-        serverNow: typeof data.serverNow === "number" ? data.serverNow : Date.now(),
-      });
+      if (data.state) {
+        applyState(data.state, data.audienceCount, data.version);
+      } else if (lastState && data.audienceCount !== lastCount) {
+        applyState(lastState, data.audienceCount);
+      }
       for (const flash of data.flashes ?? []) {
         handleMessage({ ...flash, type: "flash" });
       }
@@ -203,20 +227,14 @@ export function connectShow(
   }
 
   const ready = calibrateInitial().catch(() => clock.offsetMs);
-  if (role === "audience") {
-    void poll(true);
-    pollTimer = window.setInterval(() => {
-      void poll(true);
-    }, AUDIENCE_SNAPSHOT_MS);
-  } else {
-    void poll();
-    pollTimer = window.setInterval(() => {
-      void poll(false);
-    }, HTTP_POLL_MS);
-    backupPollTimer = window.setInterval(() => {
-      if (wsUp) void poll(true);
-    }, HTTP_BACKUP_POLL_MS);
-  }
+  void poll().then(() => {
+    // Phones that scan the QR together would otherwise keep polling in lockstep.
+    lastPollAt = Date.now() - Math.random() * WS_BACKUP_POLL_MS;
+  });
+  pollTimer = window.setInterval(() => {
+    const interval = wsUp ? WS_BACKUP_POLL_MS : HTTP_POLL_MS;
+    if (Date.now() - lastPollAt >= interval) void poll();
+  }, POLL_TICK_MS);
   syncTimer = window.setInterval(() => {
     if (closed) return;
     if (wsUp) {
@@ -241,10 +259,10 @@ export function connectShow(
       if (wsUp) socket.send(payload);
       return;
     }
-    // Production: always persist show commands over HTTP (Vercel → Fly). WS can still fan out.
+    // One path per command: the server fans every applied command out to all phones, so
+    // sending over both HTTP and WS would double the broadcast.
     if (securePage && role === "operator") {
       await postCommand(payload);
-      if (wsUp) socket.send(payload);
       return;
     }
     if (wsUp) {
@@ -263,7 +281,6 @@ export function connectShow(
       closed = true;
       window.clearTimeout(connectProbeTimer);
       window.clearInterval(pollTimer);
-      window.clearInterval(backupPollTimer);
       window.clearInterval(syncTimer);
       socket.close();
     },

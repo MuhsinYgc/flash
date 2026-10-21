@@ -1,6 +1,7 @@
 import { createClockSync } from "./clock-sync";
 import {
   getShowHttpUrl,
+  type AudienceTorchHit,
   type ClientMessage,
   type ServerMessage,
   type ShowRole,
@@ -12,6 +13,7 @@ type Handlers = {
   onState: (state: ShowState, audienceCount: number) => void;
   onFlash: (flash: Extract<ServerMessage, { type: "flash" }>) => void;
   onConnected: (connected: boolean) => void;
+  onTorchHit?: (hit: AudienceTorchHit) => void;
   onError?: (message: string) => void;
 };
 
@@ -71,7 +73,11 @@ export function connectShow(
       handlers.onFlash(msg);
     }
     if (msg.type === "pong") clock.handlePong(msg);
-    if (msg.type === "error") handlers.onError?.(msg.message);
+    if (msg.type === "torchHit") handlers.onTorchHit?.(msg);
+    if (msg.type === "error") {
+      if (role === "audience" && msg.message === "Operator only.") return;
+      handlers.onError?.(msg.message);
+    }
   }
 
   const socket = connectShowSocket(
@@ -231,7 +237,7 @@ export function connectShow(
   async function send(msg: ClientMessage) {
     const payload =
       options.token && msg.type !== "sync" ? { ...msg, token: options.token } : msg;
-    if (msg.type === "hello" || msg.type === "sync") {
+    if (msg.type === "hello" || msg.type === "sync" || msg.type === "syncFlashReport") {
       if (wsUp) socket.send(payload);
       return;
     }

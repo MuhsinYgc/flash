@@ -30,6 +30,7 @@ import { OperatorLogin } from "@/components/show/operator-login";
 import { QR_COLORS, TEAM } from "@/lib/brand/team";
 import { beatsToCues, detectBeats } from "@/lib/show/beat-detect";
 import { connectShow } from "@/lib/show/connect";
+import { logOperatorTorchCompare, resetTorchCompare } from "@/lib/show/torch-compare";
 import { detectJoinOrigin, normalizeJoinOrigin } from "@/lib/show/join-origin";
 import {
   clearOperatorToken,
@@ -72,7 +73,13 @@ const CUE_ON_MS = 120;
 const REANCHOR_MIN_MS = 80;
 const REANCHOR_COOLDOWN_MS = 2000;
 
-export function OperatorClient({ roomId }: { roomId: string }) {
+export function OperatorClient({
+  roomId,
+  compareTorch = false,
+}: {
+  roomId: string;
+  compareTorch?: boolean;
+}) {
   const token = useSyncExternalStore(subscribeOperatorToken, getOperatorToken, () => "");
 
   if (!token) {
@@ -84,6 +91,7 @@ export function OperatorClient({ roomId }: { roomId: string }) {
       key={token}
       roomId={roomId}
       token={token}
+      compareTorch={compareTorch}
       onLogout={() => {
         clearOperatorToken();
       }}
@@ -94,10 +102,12 @@ export function OperatorClient({ roomId }: { roomId: string }) {
 function OperatorBooth({
   roomId,
   token,
+  compareTorch,
   onLogout,
 }: {
   roomId: string;
   token: string;
+  compareTorch: boolean;
   onLogout: () => void;
 }) {
   const [room, setRoom] = useState(roomId);
@@ -137,6 +147,8 @@ function OperatorBooth({
   const clockReadyRef = useRef(false);
   const mountedRef = useRef(true);
   const flashLeadRef = useRef(flashLeadMs);
+  const compareTorchRef = useRef(compareTorch);
+  compareTorchRef.current = compareTorch;
   const lastReanchorRef = useRef(0);
 
   useEffect(() => {
@@ -219,6 +231,12 @@ function OperatorBooth({
     anchorAtRef.current = null;
     flashedStopRef.current = false;
     clockReadyRef.current = false;
+    if (compareTorch) {
+      resetTorchCompare();
+      console.log(
+        "[flash-compare] açık — F12: iphone/android LED yandı + ANDROID vs IPHONE deltaMs",
+      );
+    }
     const session = connectShow(
       "operator",
       room,
@@ -226,6 +244,7 @@ function OperatorBooth({
         onConnected: (ok) => setConnected(ok),
         onState: (_next, count) => setAudienceCount(count),
         onFlash: () => undefined,
+        onTorchHit: compareTorch ? logOperatorTorchCompare : undefined,
         onError: (message) => setError(message),
       },
       { token },
@@ -242,7 +261,7 @@ function OperatorBooth({
       sessionRef.current = null;
       session.close();
     };
-  }, [room, token]);
+  }, [room, token, compareTorch]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -333,6 +352,7 @@ function OperatorBooth({
         anchoredRef.current = true;
         flashedStopRef.current = false;
         setPhase("playing");
+        if (compareTorchRef.current) resetTorchCompare();
         void sendRef.current({
           type: "playTrack",
           startedAtServerMs,

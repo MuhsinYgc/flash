@@ -10,8 +10,10 @@ export const metadata: Metadata = {
 export default async function OperatorPage({
   searchParams,
 }: {
-  searchParams: Promise<{ room?: string }>;
+  searchParams: Promise<{ room?: string; compare?: string }>;
 }) {
   const params = await searchParams;
-  return <OperatorClient roomId={sanitizeRoomId(params.room)} />;
+  return (
+    <OperatorClient roomId={sanitizeRoomId(params.room)} compareTorch={params.compare === "1"} />
+  );
 }

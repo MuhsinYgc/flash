@@ -38,9 +38,26 @@ type ClientMessageBase =
       cues?: TimelineCue[];
     }
   | { type: "reanchor"; startedAtServerMs: number }
-  | { type: "flash"; onMs?: number };
+  | { type: "flash"; onMs?: number }
+  | {
+      type: "syncFlashReport";
+      platform: string;
+      showMs: number;
+      cueIndex: number | null;
+      seq: number;
+    };
 
 export type ClientMessage = ClientMessageBase & { token?: string };
+
+export type AudienceTorchHit = {
+  type: "torchHit";
+  clientId: string;
+  platform: string;
+  showMs: number;
+  cueIndex: number | null;
+  seq: number;
+  serverNow: number;
+};
 
 export const PLAY_LEAD_MS = 420;
 /** Playback flash lead used by the operator YouTube loop. Do not change without a two-phone test. */
@@ -71,6 +88,7 @@ export type ServerMessage =
       serverNow: number;
     }
   | { type: "flash"; atServerMs: number; onMs: number; color: string }
+  | AudienceTorchHit
   | { type: "error"; message: string };
 
 export const SHOW_COLORS = [

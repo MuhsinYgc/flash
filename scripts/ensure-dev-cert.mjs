@@ -35,12 +35,14 @@ function certSans() {
 }
 
 function needsRegen() {
+  if (!existsSync(certPath) || !existsSync(keyPath)) return true;
   const want = new Set(["127.0.0.1", "localhost", ...lanIpv4()]);
   const have = new Set(certSans());
+  if (have.size === 0) return false;
   for (const item of want) {
     if (!have.has(item)) return true;
   }
-  return !existsSync(keyPath);
+  return false;
 }
 
 export function ensureDevCert() {

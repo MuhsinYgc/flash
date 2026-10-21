@@ -13,6 +13,7 @@ import { TEAM } from "@/lib/brand/team";
 import { connectShow } from "@/lib/show/connect";
 import { createGovernor } from "@/lib/show/flash-governor";
 import { defaultShowState, type LiveFlash, type ShowState } from "@/lib/show/protocol";
+import { buildTorchHitReport } from "@/lib/show/torch-compare";
 import { isLit } from "@/lib/show/timeline-player";
 import { combineTorchLeadMs, platformTorchLeadMs } from "@/lib/show/torch-lead";
 import { acquireTorch, torchMessage, type TorchControl } from "@/lib/show/torch";
@@ -61,25 +62,7 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
     let frame = 0;
     let cancelled = false;
     let offFrames = 0;
-    function applyLight(screenOn: boolean, torchOn: boolean, color: string, markMs: number) {
-      setScreenLit(screenOn);
-      setScreenColor(color);
-      if (torchOn) {
-        offFrames = 0;
-        if (litRef.current) return;
-        if (!governor.allow(markMs)) return;
-        litRef.current = true;
-        setTorchOn(true);
-        void torchRef.current?.setTorch(true);
-        return;
-      }
-      if (!litRef.current) return;
-      offFrames += 1;
-      if (offFrames < 3) return;
-      litRef.current = false;
-      setTorchOn(false);
-      void torchRef.current?.setTorch(false);
-    }
+    let torchSeq = 0;
 
     requestFullscreen();
     if (navigator.wakeLock?.request) {
@@ -109,6 +92,31 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
       onError: (message) => setError(message),
     });
     sessionRef.current = session;
+
+    function applyLight(screenOn: boolean, torchOn: boolean, color: string, markMs: number) {
+      setScreenLit(screenOn);
+      setScreenColor(color);
+      if (torchOn) {
+        offFrames = 0;
+        if (litRef.current) return;
+        if (!governor.allow(markMs)) return;
+        litRef.current = true;
+        setTorchOn(true);
+        void torchRef.current?.setTorch(true);
+        if (state.playing) {
+          torchSeq += 1;
+          const report = buildTorchHitReport(state, session.clock.serverNow(), torchSeq);
+          if (report) void session.send(report);
+        }
+        return;
+      }
+      if (!litRef.current) return;
+      offFrames += 1;
+      if (offFrames < 3) return;
+      litRef.current = false;
+      setTorchOn(false);
+      void torchRef.current?.setTorch(false);
+    }
 
     function tick() {
       const serverNow = session.clock.serverNow();

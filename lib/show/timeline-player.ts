@@ -23,6 +23,15 @@ export function showTimeMs(state: ShowState, serverNow: number) {
   return serverNow - state.startedAtServerMs;
 }
 
+export function activeTimelineCueIndex(state: ShowState, showMs: number): number | null {
+  if (state.pattern !== "timeline") return null;
+  for (let i = 0; i < state.timeline.length; i += 1) {
+    const cue = state.timeline[i];
+    if (showMs >= cue.atMs && showMs < cue.atMs + cue.onMs) return i;
+  }
+  return null;
+}
+
 export function isLit(
   state: ShowState,
   serverNow: number,

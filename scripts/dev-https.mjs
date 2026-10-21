@@ -2,9 +2,12 @@ import { createServer as createHttpsServer } from "node:https";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import next from "next";
-import { WebSocket, WebSocketServer } from "ws";
 import { ensureDevCert } from "./ensure-dev-cert.mjs";
+
+const require = createRequire(import.meta.url);
+const { WebSocket, WebSocketServer } = require("ws");
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const port = Number(process.env.PORT ?? 3200);

@@ -176,11 +176,16 @@ export function connectShow(
     return clock.offsetMs;
   }
 
+  async function calibrate() {
+    if (wsUp) {
+      return clock.calibrate((t0) => socket.send({ type: "sync", t0 }));
+    }
+    return calibrateHttp();
+  }
+
   async function calibrateInitial() {
     for (let i = 0; i < 25; i += 1) {
-      if (wsUp) {
-        return clock.calibrate((t0) => socket.send({ type: "sync", t0 }));
-      }
+      if (wsUp) return calibrate();
       await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
     }
     return calibrateHttp();

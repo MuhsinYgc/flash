@@ -16,8 +16,6 @@ export function platformTorchLeadMs() {
 
 export function combineTorchLeadMs(measuredMs: number, platformMs = platformTorchLeadMs()) {
   const measured = Number.isFinite(measuredMs) ? Math.max(0, Math.round(measuredMs)) : 0;
-  const android = isAndroidUa();
-  const padding = android ? 40 : 0;
-  const blended = Math.max(measured + padding, platformMs);
+  const blended = Math.max(measured, platformMs);
   return Math.min(AUDIENCE_TORCH_LEAD_MAX_MS, blended);
 }

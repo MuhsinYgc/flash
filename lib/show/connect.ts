@@ -56,7 +56,8 @@ export function connectShow(
 
   function handleMessage(msg: ServerMessage) {
     if (msg.type === "welcome" || msg.type === "state") {
-      if (typeof msg.serverNow === "number") {
+      // Only seed clock on welcome; snapshot serverNow over HTTP skews offset (esp. on backup poll).
+      if (msg.type === "welcome" && typeof msg.serverNow === "number") {
         clock.handleInstant(msg.serverNow);
       }
       handlers.onState(msg.state, msg.audienceCount);

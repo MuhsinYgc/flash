@@ -48,9 +48,10 @@ export const TRACK_FLASH_LEAD_MS = 170;
 export const TRACK_FLASH_LEAD_MIN_MS = 0;
 export const TRACK_FLASH_LEAD_MAX_MS = 400;
 
-/** Audience LED lag compensation (ms added to server clock when deciding on/off). */
+/** Audience LED lag compensation (ms added to server clock when deciding torch on/off). */
 export const AUDIENCE_TORCH_LEAD_DEFAULT_MS = 0;
-export const AUDIENCE_TORCH_LEAD_ANDROID_MS = 275;
+/** Android torch API is often faster than this; too high = flash early vs timeline. */
+export const AUDIENCE_TORCH_LEAD_ANDROID_MS = 200;
 export const AUDIENCE_TORCH_LEAD_MAX_MS = 420;
 
 export type ServerMessage =

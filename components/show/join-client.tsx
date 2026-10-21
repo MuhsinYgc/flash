@@ -112,7 +112,9 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
 
     function tick() {
       const serverNow = session.clock.serverNow();
-      const started = state.playing && state.startedAtServerMs != null && serverNow >= state.startedAtServerMs;
+      const anchor = state.startedAtServerMs;
+      const started =
+        state.playing && anchor != null && serverNow >= anchor - 400;
       if (!started) {
         offFrames = 3;
         applyLight(false, false, state.color, serverNow);

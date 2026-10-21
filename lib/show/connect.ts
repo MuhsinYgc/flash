@@ -42,6 +42,7 @@ export function connectShow(
   const securePage = window.location.protocol === "https:";
   const HTTP_POLL_MS = 500;
   const HTTP_BACKUP_POLL_MS = 1200;
+  const AUDIENCE_SNAPSHOT_MS = 500;
   const HTTP_SYNC_MS = 4000;
 
   function markConnected() {
@@ -196,13 +197,20 @@ export function connectShow(
   }
 
   const ready = calibrateInitial().catch(() => clock.offsetMs);
-  void poll();
-  pollTimer = window.setInterval(() => {
-    void poll(false);
-  }, HTTP_POLL_MS);
-  backupPollTimer = window.setInterval(() => {
-    if (wsUp) void poll(true);
-  }, HTTP_BACKUP_POLL_MS);
+  if (role === "audience") {
+    void poll(true);
+    pollTimer = window.setInterval(() => {
+      void poll(true);
+    }, AUDIENCE_SNAPSHOT_MS);
+  } else {
+    void poll();
+    pollTimer = window.setInterval(() => {
+      void poll(false);
+    }, HTTP_POLL_MS);
+    backupPollTimer = window.setInterval(() => {
+      if (wsUp) void poll(true);
+    }, HTTP_BACKUP_POLL_MS);
+  }
   syncTimer = window.setInterval(() => {
     if (closed) return;
     if (wsUp) {
@@ -212,19 +220,32 @@ export function connectShow(
     void httpSync();
   }, HTTP_SYNC_MS);
 
-  async function send(msg: ClientMessage) {
-    const payload =
-      options.token && msg.type !== "sync" ? { ...msg, token: options.token } : msg;
-    if (wsUp) {
-      socket.send(payload);
-      return;
-    }
-    if (msg.type === "hello" || msg.type === "sync") return;
+  async function postCommand(payload: ClientMessage) {
     await fetch(getShowHttpUrl("/command"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...payload, roomId }),
     }).catch(() => undefined);
+  }
+
+  async function send(msg: ClientMessage) {
+    const payload =
+      options.token && msg.type !== "sync" ? { ...msg, token: options.token } : msg;
+    if (msg.type === "hello" || msg.type === "sync") {
+      if (wsUp) socket.send(payload);
+      return;
+    }
+    // Production: always persist show commands over HTTP (Vercel → Fly). WS can still fan out.
+    if (securePage && role === "operator") {
+      await postCommand(payload);
+      if (wsUp) socket.send(payload);
+      return;
+    }
+    if (wsUp) {
+      socket.send(payload);
+      return;
+    }
+    await postCommand(payload);
   }
 
   return {

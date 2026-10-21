@@ -37,7 +37,10 @@ export function connectShow(
   let httpUp = false;
   let pollTimer = 0;
   let syncTimer = 0;
+  let pollInFlight = false;
   const securePage = window.location.protocol === "https:";
+  const HTTP_POLL_MS = 450;
+  const HTTP_SYNC_MS = 4000;
 
   function markConnected() {
     handlers.onConnected(wsUp || httpUp);
@@ -74,7 +77,6 @@ export function connectShow(
       onOpen: () => {
         wsUp = true;
         markConnected();
-        void clock.calibrate((t0) => socket.send({ type: "sync", t0 }));
       },
       onClose: () => {
         wsUp = false;
@@ -116,67 +118,87 @@ export function connectShow(
   }
 
   async function poll() {
-    if (closed) return;
-    const t0 = Date.now();
-    const params: Record<string, string> = {
-      room: roomId,
-      clientId: httpId,
-      t0: String(t0),
-    };
-    if (role === "operator") params.role = "operator";
-    const res = await fetchFirst(httpUrls("/snapshot", params));
-    if (!res) {
-      httpUp = false;
+    if (closed || wsUp || pollInFlight) return;
+    pollInFlight = true;
+    try {
+      const t0 = Date.now();
+      const params: Record<string, string> = {
+        room: roomId,
+        clientId: httpId,
+        t0: String(t0),
+      };
+      if (role === "operator") params.role = "operator";
+      const res = await fetchFirst(httpUrls("/snapshot", params));
+      if (!res) {
+        httpUp = false;
+        markConnected();
+        return;
+      }
+      const data = (await res.json()) as {
+        state: ShowState;
+        audienceCount: number;
+        serverNow?: number;
+        t1?: number;
+        t2?: number;
+        flashes?: Extract<ServerMessage, { type: "flash" }>[];
+      };
+      httpUp = true;
       markConnected();
-      return;
-    }
-    const data = (await res.json()) as {
-      state: ShowState;
-      audienceCount: number;
-      serverNow?: number;
-      t1?: number;
-      t2?: number;
-      flashes?: Extract<ServerMessage, { type: "flash" }>[];
-    };
-    httpUp = true;
-    markConnected();
-    if (typeof data.t1 === "number") {
-      handleMessage({ type: "pong", t0, t1: data.t1, t2: data.t2 ?? data.t1 });
-    }
-    handleMessage({
-      type: "state",
-      state: data.state,
-      audienceCount: data.audienceCount,
-      serverNow: typeof data.serverNow === "number" ? data.serverNow : Date.now(),
-    });
-    for (const flash of data.flashes ?? []) {
-      handleMessage({ ...flash, type: "flash" });
+      if (typeof data.t1 === "number") {
+        handleMessage({ type: "pong", t0, t1: data.t1, t2: data.t2 ?? data.t1 });
+      }
+      handleMessage({
+        type: "state",
+        state: data.state,
+        audienceCount: data.audienceCount,
+        serverNow: typeof data.serverNow === "number" ? data.serverNow : Date.now(),
+      });
+      for (const flash of data.flashes ?? []) {
+        handleMessage({ ...flash, type: "flash" });
+      }
+    } finally {
+      pollInFlight = false;
     }
   }
 
   async function httpSync() {
-    if (closed) return;
+    if (closed || wsUp) return;
     const t0 = Date.now();
     const res = await fetchFirst(httpUrls("/sync", { t0: String(t0) }));
     if (!res) return;
     handleMessage((await res.json()) as ServerMessage);
   }
 
-  async function calibrate() {
-    for (let i = 0; i < 8; i += 1) {
+  async function calibrateHttp() {
+    for (let i = 0; i < 6; i += 1) {
       await httpSync();
     }
     return clock.offsetMs;
   }
 
-  const ready = calibrate().catch(() => clock.offsetMs);
+  async function calibrateInitial() {
+    for (let i = 0; i < 25; i += 1) {
+      if (wsUp) {
+        return clock.calibrate((t0) => socket.send({ type: "sync", t0 }));
+      }
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
+    }
+    return calibrateHttp();
+  }
+
+  const ready = calibrateInitial().catch(() => clock.offsetMs);
   void poll();
   pollTimer = window.setInterval(() => {
     void poll();
-  }, 160);
+  }, HTTP_POLL_MS);
   syncTimer = window.setInterval(() => {
+    if (closed) return;
+    if (wsUp) {
+      socket.send({ type: "sync", t0: Date.now() });
+      return;
+    }
     void httpSync();
-  }, 4000);
+  }, HTTP_SYNC_MS);
 
   async function send(msg: ClientMessage) {
     const payload =

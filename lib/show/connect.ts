@@ -36,10 +36,12 @@ export function connectShow(
   let wsUp = false;
   let httpUp = false;
   let pollTimer = 0;
+  let backupPollTimer = 0;
   let syncTimer = 0;
   let pollInFlight = false;
   const securePage = window.location.protocol === "https:";
-  const HTTP_POLL_MS = 450;
+  const HTTP_POLL_MS = 500;
+  const HTTP_BACKUP_POLL_MS = 1200;
   const HTTP_SYNC_MS = 4000;
 
   function markConnected() {
@@ -117,8 +119,9 @@ export function connectShow(
     return null;
   }
 
-  async function poll() {
-    if (closed || wsUp || pollInFlight) return;
+  async function poll(allowWhileWs = false) {
+    if (closed || pollInFlight) return;
+    if (wsUp && !allowWhileWs) return;
     pollInFlight = true;
     try {
       const t0 = Date.now();
@@ -194,8 +197,11 @@ export function connectShow(
   const ready = calibrateInitial().catch(() => clock.offsetMs);
   void poll();
   pollTimer = window.setInterval(() => {
-    void poll();
+    void poll(false);
   }, HTTP_POLL_MS);
+  backupPollTimer = window.setInterval(() => {
+    if (wsUp) void poll(true);
+  }, HTTP_BACKUP_POLL_MS);
   syncTimer = window.setInterval(() => {
     if (closed) return;
     if (wsUp) {
@@ -229,6 +235,7 @@ export function connectShow(
       closed = true;
       window.clearTimeout(connectProbeTimer);
       window.clearInterval(pollTimer);
+      window.clearInterval(backupPollTimer);
       window.clearInterval(syncTimer);
       socket.close();
     },

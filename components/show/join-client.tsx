@@ -287,6 +287,11 @@ export function JoinClient({ roomId, start = false }: { roomId: string; start?: 
           </TeamButton>
         ) : null}
       </div>
+      {connected && !playing ? (
+        <p className="px-5 pb-8 text-center text-xs lowercase text-white/55">
+          Ekrandan ayrılırsanız flaş otomatik olarak kapanacaktır.
+        </p>
+      ) : null}
     </main>
   );
 }
